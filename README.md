@@ -13,6 +13,7 @@ A versatile ComfyUI custom node that renders HTML, SVG, Markdown, and code conte
 ![Screenshot 3](screenshots/screenshot_3.jpg)
 ![Screenshot 4](screenshots/screenshot_4.jpg)
 ![Screenshot 5](screenshots/screenshot_5.jpg)
+![Screenshot 5](screenshots/screenshot_6.jpg)
 
 </details>
 
