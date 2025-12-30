@@ -13,7 +13,39 @@ const STATE = {
   cleanupIntervalId: null,
   cleanupListenersAttached: false,
   lastScale: 1,
+  prismScripts: null,
 };
+
+const PRISM_FILES = [
+  "prism.min.txt",
+  "prism-python.min.txt",
+  "prism-javascript.min.txt",
+  "prism-css.min.txt",
+  "prism-markup.min.txt",
+  "prism-json.min.txt",
+  "prism-bash.min.txt",
+];
+
+async function loadPrismScripts() {
+  if (STATE.prismScripts) return STATE.prismScripts;
+  
+  try {
+    const basePath = import.meta.url.substring(0, import.meta.url.lastIndexOf("/"));
+    const scripts = await Promise.all(
+      PRISM_FILES.map(async (file) => {
+        const res = await fetch(`${basePath}/${file}`);
+        return res.ok ? res.text() : "";
+      })
+    );
+    STATE.prismScripts = scripts.join("\n");
+    return STATE.prismScripts;
+  } catch (e) {
+    console.error("[WAS Viewer] Failed to load Prism scripts:", e);
+    return "";
+  }
+}
+
+loadPrismScripts();
 
 function readCssVar(style, name) {
   const v = style.getPropertyValue(name);
@@ -323,7 +355,7 @@ async function createZipBlob(files) {
   return new Blob(parts, { type: "application/zip" });
 }
 
-function buildIframeContent(content, contentType, theme) {
+function buildIframeContent(content, contentType, theme, excluded = []) {
   const baseStyles = `
     * { box-sizing: border-box; }
     html, body {
@@ -406,6 +438,17 @@ function buildIframeContent(content, contentType, theme) {
       align-items: center;
       margin-bottom: 8px;
     }
+    .list-header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .list-checkbox {
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+      accent-color: ${theme.accent};
+    }
     .list-index {
       display: inline-block;
       background: ${theme.accent};
@@ -414,6 +457,12 @@ function buildIframeContent(content, contentType, theme) {
       font-weight: bold;
       padding: 2px 6px;
       border-radius: 4px;
+    }
+    .list-item.excluded {
+      opacity: 0.5;
+    }
+    .list-item.excluded .list-index {
+      background: #666;
     }
     .copy-btn {
       background: transparent;
@@ -462,9 +511,13 @@ function buildIframeContent(content, contentType, theme) {
       } else {
         itemHtml = `<div class="list-content">${escapeHtml(item)}</div>`;
       }
-      return `<div class="list-item">
+      const isExcluded = excluded.includes(idx);
+      return `<div class="list-item${isExcluded ? ' excluded' : ''}" data-idx="${idx}">
         <div class="list-header">
-          <span class="list-index">${idx + 1} / ${items.length}</span>
+          <div class="list-header-left">
+            <input type="checkbox" class="list-checkbox" data-idx="${idx}" ${isExcluded ? '' : 'checked'} onchange="toggleItem(${idx}, this.checked)">
+            <span class="list-index">${idx + 1} / ${items.length}</span>
+          </div>
           <button class="copy-btn" data-index="${idx}" onclick="copyItem(${idx})">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
@@ -489,6 +542,11 @@ function buildIframeContent(content, contentType, theme) {
             btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg> Copy';
           }, 1500);
         });
+      }
+      function toggleItem(idx, checked) {
+        const item = document.querySelector('.list-item[data-idx="' + idx + '"]');
+        if (item) item.classList.toggle('excluded', !checked);
+        window.parent.postMessage({ type: 'was-viewer-toggle', idx: idx, checked: checked }, '*');
       }
     <\/script>`;
   } else switch (contentType) {
@@ -520,12 +578,61 @@ function buildIframeContent(content, contentType, theme) {
       bodyContent = `<pre>${escapeHtml(content)}</pre>`;
   }
 
+  const prismTheme = `
+    code[class*="language-"], pre[class*="language-"] {
+      color: ${theme.fg};
+      text-shadow: none;
+      font-family: "Fira Code", Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;
+      font-size: 13px;
+      text-align: left;
+      white-space: pre-wrap;
+      word-spacing: normal;
+      word-break: normal;
+      word-wrap: break-word;
+      line-height: 1.5;
+      tab-size: 4;
+      hyphens: none;
+    }
+    pre[class*="language-"] {
+      padding: 12px;
+      margin: 0;
+      overflow: auto;
+      border-radius: 6px;
+      background: rgba(0,0,0,0.3);
+    }
+    :not(pre) > code[class*="language-"] {
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: rgba(0,0,0,0.2);
+    }
+    .token.comment, .token.prolog, .token.doctype, .token.cdata { color: #6a9955; }
+    .token.punctuation { color: ${theme.fg}; }
+    .token.namespace { opacity: .7; }
+    .token.property, .token.tag, .token.boolean, .token.number, .token.constant, .token.symbol, .token.deleted { color: #b5cea8; }
+    .token.selector, .token.attr-name, .token.string, .token.char, .token.builtin, .token.inserted { color: #ce9178; }
+    .token.operator, .token.entity, .token.url, .language-css .token.string, .style .token.string { color: #d4d4d4; }
+    .token.atrule, .token.attr-value, .token.keyword { color: #569cd6; }
+    .token.function, .token.class-name { color: #dcdcaa; }
+    .token.regex, .token.important, .token.variable { color: #d16969; }
+    .token.important, .token.bold { font-weight: bold; }
+    .token.italic { font-style: italic; }
+  `;
+
+  const needsPrism = ["python", "javascript", "css"].includes(contentType) || 
+                     content.includes("```") || content.includes("<code");
+
+  const prismScripts = needsPrism && STATE.prismScripts ? `
+    <script>${STATE.prismScripts}<\/script>
+    <script>document.addEventListener('DOMContentLoaded', () => Prism.highlightAll());<\/script>
+  ` : "";
+
   return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>${baseStyles}</style>
+  <style>${baseStyles}${needsPrism ? prismTheme : ""}</style>
+  ${prismScripts}
 </head>
 <body>${bodyContent}</body>
 </html>`;
@@ -715,6 +822,59 @@ function createControlsBar(node, elements) {
   `;
   typeLabel.textContent = "Type: detecting...";
   controls.appendChild(typeLabel);
+
+  const toggleAllBtn = document.createElement("button");
+  toggleAllBtn.textContent = "☑";
+  toggleAllBtn.title = "Toggle All Checkboxes";
+  toggleAllBtn.style.cssText = `
+    padding: 0 6px;
+    font-size: 14px;
+    border: 1px solid ${theme.border};
+    border-radius: 4px;
+    background: ${theme.bg};
+    color: ${theme.fg};
+    cursor: pointer;
+    font-family: sans-serif;
+    display: none;
+  `;
+  toggleAllBtn.onmouseenter = () => { toggleAllBtn.style.background = theme.accent; toggleAllBtn.style.color = "#fff"; };
+  toggleAllBtn.onmouseleave = () => { toggleAllBtn.style.background = theme.bg; toggleAllBtn.style.color = theme.fg; };
+  
+  toggleAllBtn.onclick = () => {
+    const content = getNodeContent(node, elements);
+    const contentHash = content ? content.length + "_" + content.slice(0, 100) : "";
+    const widget = node.widgets?.find(w => w.name === "excluded_indices");
+    if (!widget) return;
+    
+    let data = { hash: contentHash, excluded: [] };
+    try {
+      const parsed = JSON.parse(widget.value || "{}");
+      if (parsed && typeof parsed === "object" && parsed.hash !== undefined) {
+        data = parsed;
+      }
+    } catch {}
+    
+    const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
+    const items = content.split(LIST_SEPARATOR);
+    const allChecked = data.excluded.length === 0;
+    
+    if (allChecked) {
+      data.excluded = items.map((_, i) => i);
+      toggleAllBtn.textContent = "☐";
+      toggleAllBtn.title = "Check All";
+    } else {
+      data.excluded = [];
+      toggleAllBtn.textContent = "☑";
+      toggleAllBtn.title = "Uncheck All";
+    }
+    
+    widget.value = JSON.stringify(data);
+    elements.lastContentHash = "";
+    node.setDirtyCanvas?.(true, true);
+    updateIframeContent(node, elements);
+  };
+  controls.appendChild(toggleAllBtn);
+  elements.toggleAllBtn = toggleAllBtn;
 
   const editBtn = document.createElement("button");
   editBtn.textContent = "Edit";
@@ -1019,6 +1179,7 @@ function ensureElementsForNode(node) {
     iframe: null,
     textarea: null,
     typeLabel: null,
+    toggleAllBtn: null,
     lastContentHash: "",
     isEditing: false,
     hasBackendContent: false,
@@ -1156,15 +1317,6 @@ function updateIframeContent(node, elements) {
   const content = getNodeContent(node, elements);
   const contentHash = content ? content.length + "_" + content.slice(0, 100) : "";
   
-  console.log("[WAS Viewer] updateIframeContent:", {
-    contentLength: content?.length,
-    contentHash,
-    lastHash: elements.lastContentHash,
-    hasBackendContent: elements.hasBackendContent,
-    hasUserEdits: elements.hasUserEdits,
-    contentPreview: content?.slice(0, 50)
-  });
-  
   if (contentHash === elements.lastContentHash) return;
   elements.lastContentHash = contentHash;
 
@@ -1184,13 +1336,51 @@ function updateIframeContent(node, elements) {
     elements.typeLabel.textContent = `Type: ${typeNames[contentType] || "Unknown"}`;
   }
 
+  const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
+  const isListContent = content && content.includes(LIST_SEPARATOR);
+  
+  if (elements.toggleAllBtn) {
+    elements.toggleAllBtn.style.display = isListContent ? "block" : "none";
+    if (isListContent) {
+      const excludedWidget = node.widgets?.find(w => w.name === "excluded_indices");
+      let excludedCount = 0;
+      try {
+        const parsed = JSON.parse(excludedWidget?.value || "{}");
+        if (parsed?.excluded) excludedCount = parsed.excluded.length;
+      } catch {}
+      elements.toggleAllBtn.textContent = excludedCount === 0 ? "☑" : "☐";
+      elements.toggleAllBtn.title = excludedCount === 0 ? "Uncheck All" : "Check All";
+    }
+  }
+
   if (!content) {
     const emptyHtml = buildIframeContent("<p style='opacity:0.5;text-align:center;margin-top:40px;'>No content. Click Edit to add content or connect a STRING input.</p>", "html", theme);
     elements.iframe.srcdoc = emptyHtml;
     return;
   }
 
-  const html = buildIframeContent(content, contentType, theme);
+  let excluded = [];
+  const excludedWidget = node.widgets?.find(w => w.name === "excluded_indices");
+  if (excludedWidget?.value) {
+    try {
+      const parsed = JSON.parse(excludedWidget.value);
+      if (parsed && typeof parsed === "object" && parsed.hash !== undefined) {
+        if (parsed.hash === contentHash) {
+          excluded = Array.isArray(parsed.excluded) ? parsed.excluded : [];
+        } else {
+          excludedWidget.value = JSON.stringify({ hash: contentHash, excluded: [] });
+        }
+      } else if (Array.isArray(parsed)) {
+        excluded = parsed;
+        excludedWidget.value = JSON.stringify({ hash: contentHash, excluded: parsed });
+      }
+    } catch {
+      excludedWidget.value = JSON.stringify({ hash: contentHash, excluded: [] });
+    }
+  } else if (excludedWidget) {
+    excludedWidget.value = JSON.stringify({ hash: contentHash, excluded: [] });
+  }
+  const html = buildIframeContent(content, contentType, theme, excluded);
   
   const needsBlobUrl = contentType === "html" && (
     content.includes("WebAssembly") ||
@@ -1216,6 +1406,40 @@ function updateIframeContent(node, elements) {
     elements.iframe.srcdoc = html;
   }
 }
+
+window.addEventListener("message", (event) => {
+  if (event.data?.type === "was-viewer-toggle") {
+    const { idx, checked } = event.data;
+    for (const [nodeId, elements] of STATE.nodeIdToElements.entries()) {
+      if (elements.iframe?.contentWindow === event.source) {
+        const node = app.graph?.getNodeById(parseInt(nodeId));
+        if (node) {
+          const widget = node.widgets?.find(w => w.name === "excluded_indices");
+          if (widget) {
+            let data = { hash: "", excluded: [] };
+            try {
+              const parsed = JSON.parse(widget.value || "{}");
+              if (parsed && typeof parsed === "object" && parsed.hash !== undefined) {
+                data = parsed;
+              } else if (Array.isArray(parsed)) {
+                data.excluded = parsed;
+              }
+            } catch {}
+            if (!Array.isArray(data.excluded)) data.excluded = [];
+            if (checked) {
+              data.excluded = data.excluded.filter(i => i !== idx);
+            } else {
+              if (!data.excluded.includes(idx)) data.excluded.push(idx);
+            }
+            widget.value = JSON.stringify(data);
+            node.setDirtyCanvas?.(true, true);
+          }
+        }
+        break;
+      }
+    }
+  }
+});
 
 app.registerExtension({
   name: EXT_NAME,
@@ -1243,6 +1467,16 @@ app.registerExtension({
           manualWidget.type = "hidden";
           manualWidget.computeSize = () => [0, -4];
           manualWidget.serializeValue = () => manualWidget.value;
+        }
+
+        let excludedWidget = this.widgets?.find((w) => w.name === "excluded_indices");
+        if (!excludedWidget) {
+          excludedWidget = this.addWidget("text", "excluded_indices", "[]", () => {});
+        }
+        if (excludedWidget) {
+          excludedWidget.type = "hidden";
+          excludedWidget.computeSize = () => [0, -4];
+          excludedWidget.serializeValue = () => excludedWidget.value;
         }
 
         for (const w of this.widgets || []) {

@@ -19,6 +19,7 @@ class WASComfyViewer:
             },
             "hidden": {
                 "manual_content": ("STRING", {"default": ""}),
+                "excluded_indices": ("STRING", {"default": "[]"}),
             },
         }
 
@@ -30,7 +31,7 @@ class WASComfyViewer:
     FUNCTION = "run"
     CATEGORY = "WAS/View"
 
-    def run(self, content=None, manual_content=None):
+    def run(self, content=None, manual_content=None, excluded_indices=None):
         import json
         import logging
         
@@ -63,10 +64,22 @@ class WASComfyViewer:
         if not isinstance(manual_content, list):
             manual_content = [manual_content]
         
-        content_trimmed = [c[:256] for c in content]
-        manual_content_trimmed = [c[:256] for c in manual_content]
+        excluded = []
+        if excluded_indices:
+            excluded_str = excluded_indices[0] if isinstance(excluded_indices, list) else excluded_indices
+            try:
+                parsed = json.loads(excluded_str)
+                if isinstance(parsed, dict) and "excluded" in parsed:
+                    excluded = parsed["excluded"] if isinstance(parsed["excluded"], list) else []
+                elif isinstance(parsed, list):
+                    excluded = parsed
+            except:
+                excluded = []
         
-        logger.info(f"\n[WAS Viewer] Content:\n{content_trimmed}\nManual Content:\n{manual_content_trimmed}\n")
+        content_trimmed = [c[:256] if isinstance(c, str) else str(c)[:256] for c in content]
+        manual_content_trimmed = [c[:256] if isinstance(c, str) else str(c)[:256] for c in manual_content]
+        
+        logger.info(f"\n[WAS Viewer] Content:\n{content_trimmed}\nManual Content:\n{manual_content_trimmed}\nExcluded: {excluded}\n")
         
         if len(content) > 0 and any(c for c in content):
             values = [to_string(c) for c in content]
@@ -79,7 +92,12 @@ class WASComfyViewer:
             logger.info("[WAS Viewer] No content, using empty")
         
         display_text = "\n---LIST_SEPARATOR---\n".join(values)
-        return {"ui": {"text": (display_text,)}, "result": (values,)}
+        
+        output_values = [v for i, v in enumerate(values) if i not in excluded]
+        if not output_values:
+            output_values = [""]
+        
+        return {"ui": {"text": (display_text,)}, "result": (output_values,)}
 
 
 NODE_CLASS_MAPPINGS = {
