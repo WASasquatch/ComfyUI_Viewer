@@ -64,68 +64,90 @@ function detectContentType(content) {
     return "html";
   }
 
-  if (trimmed.startsWith("<") && trimmed.endsWith(">") && 
-      (trimmed.includes("<div") || trimmed.includes("<span") || trimmed.includes("<p>") ||
-       trimmed.includes("<h1") || trimmed.includes("<h2") || trimmed.includes("<table") ||
-       trimmed.includes("<ul") || trimmed.includes("<ol") || trimmed.includes("<img") ||
-       trimmed.includes("<a ") || trimmed.includes("<br") || trimmed.includes("<hr") ||
-       trimmed.includes("<em>") || trimmed.includes("<strong>") || trimmed.includes("<b>") ||
-       trimmed.includes("<i>") || trimmed.includes("<code>") || trimmed.includes("<pre>"))) {
-    return "html";
+  const scores = { html: 0, markdown: 0, python: 0, javascript: 0, css: 0 };
+
+  const htmlTags = ["<div", "<span", "<p>", "<h1", "<h2", "<h3", "<table", "<ul", "<ol", 
+                    "<img", "<a ", "<br", "<hr", "<em>", "<strong>", "<b>", "<i>", "<code>", "<pre>"];
+  for (const tag of htmlTags) {
+    if (trimmed.includes(tag)) scores.html += 2;
   }
+  if (trimmed.startsWith("<") && trimmed.endsWith(">")) scores.html += 1;
 
   const mdPatterns = [
-    /^#{1,6}\s+/m,
-    /^\s*[-*+]\s+/m,
-    /^\s*\d+\.\s+/m,
-    /\[.+?\]\(.+?\)/,
-    /^\s*```/m,
-    /^\s*>/m,
-    /\*\*.+?\*\*/,
-    /__.+?__/,
-    /~~.+?~~/,
-    /^\s*\|.+\|/m,
-    /!\[.+?\]\(.+?\)/,
+    [/^#{1,6}\s+.+/m, 3],
+    [/^\s*[-*+]\s+.+/m, 1],
+    [/^\s*\d+\.\s+.+/m, 1],
+    [/\[[^\]]+\]\([^)]+\)/, 2],
+    [/^\s*```/m, 3],
+    [/^\s*>/m, 1],
+    [/\*\*[^*]+\*\*/, 1],
+    [/~~[^~]+~~/, 1],
+    [/^\s*\|.+\|.+\|/m, 2],
+    [/!\[[^\]]*\]\([^)]+\)/, 2],
   ];
-  
-  let mdScore = 0;
-  for (const pattern of mdPatterns) {
-    if (pattern.test(trimmed)) mdScore++;
-  }
-  if (mdScore >= 1) return "markdown";
-
-  const firstLine = trimmed.split("\n")[0].toLowerCase();
-  
-  if (firstLine.includes("import ") || firstLine.includes("from ") || 
-      firstLine.startsWith("def ") || firstLine.startsWith("class ") ||
-      trimmed.includes("def ") || trimmed.includes("self.")) {
-    return "python";
+  for (const [pattern, weight] of mdPatterns) {
+    if (pattern.test(trimmed)) scores.markdown += weight;
   }
 
-  if (firstLine.includes("function ") || firstLine.includes("const ") || 
-      firstLine.includes("let ") || firstLine.includes("var ") ||
-      trimmed.includes("=> {") || trimmed.includes("function(") ||
-      firstLine.startsWith("import {") || firstLine.startsWith("export ")) {
-    return "javascript";
+  const pyPatterns = [
+    [/^import\s+\w+/m, 3],
+    [/^from\s+\w+\s+import/m, 3],
+    [/^def\s+\w+\s*\(/m, 3],
+    [/^class\s+\w+/m, 3],
+    [/self\.\w+/, 2],
+    [/__init__/, 2],
+    [/__name__/, 2],
+    [/:\s*$/m, 1],
+    [/^\s+return\s+/m, 1],
+    [/^\s+if\s+.+:/m, 1],
+    [/^\s+for\s+.+:/m, 1],
+    [/^\s+elif\s+/m, 2],
+    [/True|False|None/, 1],
+  ];
+  for (const [pattern, weight] of pyPatterns) {
+    if (pattern.test(trimmed)) scores.python += weight;
   }
 
-  if (trimmed.includes("{") && trimmed.includes("}") && 
-      (trimmed.includes(":") || trimmed.includes(";"))) {
-    const cssPatterns = [
-      /[.#]?[\w-]+\s*\{[^}]*\}/,
-      /:\s*[\w-]+\s*;/,
-      /@media\s/,
-      /@import\s/,
-      /@keyframes\s/,
-    ];
-    let cssScore = 0;
-    for (const pattern of cssPatterns) {
-      if (pattern.test(trimmed)) cssScore++;
+  const jsPatterns = [
+    [/^function\s+\w+\s*\(/m, 3],
+    [/^const\s+\w+\s*=/m, 3],
+    [/^let\s+\w+\s*=/m, 3],
+    [/^var\s+\w+\s*=/m, 2],
+    [/=>\s*\{/, 2],
+    [/^import\s+\{/m, 3],
+    [/^export\s+(default\s+)?/m, 3],
+    [/document\.\w+/, 2],
+    [/console\.\w+/, 2],
+    [/\.addEventListener\(/, 2],
+    [/===|!==/, 1],
+    [/\?\.\w+/, 2],
+  ];
+  for (const [pattern, weight] of jsPatterns) {
+    if (pattern.test(trimmed)) scores.javascript += weight;
+  }
+
+  const cssPatterns = [
+    [/[.#][\w-]+\s*\{/, 2],
+    [/:\s*[\w-]+\s*;/, 2],
+    [/@media\s/, 3],
+    [/@import\s/, 2],
+    [/@keyframes\s/, 3],
+    [/^\s*[\w-]+:\s*[^;]+;/m, 1],
+  ];
+  for (const [pattern, weight] of cssPatterns) {
+    if (pattern.test(trimmed)) scores.css += weight;
+  }
+
+  let maxType = "text";
+  let maxScore = 0;
+  for (const [type, score] of Object.entries(scores)) {
+    if (score > maxScore) {
+      maxScore = score;
+      maxType = type;
     }
-    if (cssScore >= 2) return "css";
   }
 
-  return "text";
+  return maxScore >= 2 ? maxType : "text";
 }
 
 function escapeHtml(text) {
