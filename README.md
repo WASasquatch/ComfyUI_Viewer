@@ -1,9 +1,9 @@
 # ComfyUI Content Viewer
 
-A versatile ComfyUI custom node that renders HTML, SVG, Markdown, and code content in a secure embedded iframe viewer with full editing, download, and list support.
-
 ![Content Viewer](https://img.shields.io/badge/ComfyUI-Content_Viewer-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
+
+A versatile ComfyUI custom node that renders HTML, SVG, Markdown, and code content in a secure embedded iframe viewer with full editing, download, and list support.
 
 ## Features
 
@@ -38,20 +38,20 @@ A versatile ComfyUI custom node that renders HTML, SVG, Markdown, and code conte
 - **Sandboxed iframe** - Content runs in isolated sandbox without access to parent page
 - **No same-origin** - Iframe cannot access ComfyUI's JavaScript context or localStorage
 
+
 ## Installation
 
-### Via ComfyUI Manager
-Search for "Content Viewer" in ComfyUI Manager and install.
+- **Option A (git clone)**
+  - Clone this repo into:
+    - `ComfyUI/custom_nodes/ComfyUI_Viewer`
 
-### Manual Installation
-Clone this repository into your ComfyUI `custom_nodes` folder:
+- **Option B (Manager)**
+  - Open Manager and install **ComfyUI_Viewer**
 
-```bash
-cd ComfyUI/custom_nodes
-git clone https://github.com/WASasquatch/ComfyUI_Viewer
-```
-
-Restart ComfyUI.
+- **Option C (zip)**
+  - Download the repo as a zip.
+  - Extract it to:
+    - `ComfyUI/custom_nodes/ComfyUI_Viewer`
 
 ## Usage
 
