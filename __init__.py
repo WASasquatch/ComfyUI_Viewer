@@ -19,7 +19,7 @@ class WASComfyViewer:
             },
             "hidden": {
                 "manual_content": ("STRING", {"default": ""}),
-                "excluded_indices": ("STRING", {"default": "[]"}),
+                "viewer_meta": ("STRING", {"default": "{}"}),
             },
         }
 
@@ -31,7 +31,7 @@ class WASComfyViewer:
     FUNCTION = "run"
     CATEGORY = "WAS/View"
 
-    def run(self, content=None, manual_content=None, excluded_indices=None):
+    def run(self, content=None, manual_content=None, viewer_meta=None):
         import json
         import logging
         
@@ -65,14 +65,12 @@ class WASComfyViewer:
             manual_content = [manual_content]
         
         excluded = []
-        if excluded_indices:
-            excluded_str = excluded_indices[0] if isinstance(excluded_indices, list) else excluded_indices
+        if viewer_meta:
+            meta_str = viewer_meta[0] if isinstance(viewer_meta, list) else viewer_meta
             try:
-                parsed = json.loads(excluded_str)
+                parsed = json.loads(meta_str)
                 if isinstance(parsed, dict) and "excluded" in parsed:
                     excluded = parsed["excluded"] if isinstance(parsed["excluded"], list) else []
-                elif isinstance(parsed, list):
-                    excluded = parsed
             except:
                 excluded = []
         
@@ -81,23 +79,29 @@ class WASComfyViewer:
         
         logger.info(f"\n[WAS Viewer] Content:\n{content_trimmed}\nManual Content:\n{manual_content_trimmed}\nExcluded: {excluded}\n")
         
-        if len(content) > 0 and any(c for c in content):
+        LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n"
+        
+        if len(manual_content) > 0 and any(m for m in manual_content):
+            combined = to_string(manual_content[0]) if len(manual_content) == 1 else LIST_SEPARATOR.join(to_string(m) for m in manual_content)
+            values = combined.split(LIST_SEPARATOR) if LIST_SEPARATOR in combined else [combined]
+            logger.info(f"[WAS Viewer] Using manual_content: {len(values)} items")
+        elif len(content) > 0 and any(c for c in content):
             values = [to_string(c) for c in content]
             logger.info(f"[WAS Viewer] Using content input: {len(values)} items")
-        elif len(manual_content) > 0 and any(m for m in manual_content):
-            values = [to_string(m) for m in manual_content]
-            logger.info(f"[WAS Viewer] Using manual_content: {len(values)} items")
         else:
             values = [""]
             logger.info("[WAS Viewer] No content, using empty")
         
-        display_text = "\n---LIST_SEPARATOR---\n".join(values)
+        display_text = LIST_SEPARATOR.join(values)
+        
+        source_content = LIST_SEPARATOR.join(to_string(c) for c in content) if content else ""
+        content_hash = str(len(source_content)) + "_" + str(hash(source_content) & 0xFFFFFFFF)
         
         output_values = [v for i, v in enumerate(values) if i not in excluded]
         if not output_values:
             output_values = [""]
         
-        return {"ui": {"text": (display_text,)}, "result": (output_values,)}
+        return {"ui": {"text": (display_text,), "source_content": (source_content,), "content_hash": (content_hash,)}, "result": (output_values,)}
 
 
 NODE_CLASS_MAPPINGS = {

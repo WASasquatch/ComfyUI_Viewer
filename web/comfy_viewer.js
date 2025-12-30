@@ -47,6 +47,16 @@ async function loadPrismScripts() {
 
 loadPrismScripts();
 
+function simpleHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return Math.abs(hash).toString(36);
+}
+
 function readCssVar(style, name) {
   const v = style.getPropertyValue(name);
   return v ? String(v).trim() : "";
@@ -797,7 +807,7 @@ function getConnectedContent(node) {
 function getNodeContent(node, elements) {
   const manualContent = getWidgetValue(node, "manual_content");
   
-  if (manualContent && (elements?.hasBackendContent || elements?.hasUserEdits)) {
+  if (manualContent) {
     return manualContent;
   }
   
@@ -806,7 +816,7 @@ function getNodeContent(node, elements) {
     return connectedContent;
   }
   
-  return manualContent || "";
+  return "";
 }
 
 function createControlsBar(node, elements) {
@@ -857,33 +867,30 @@ function createControlsBar(node, elements) {
   
   toggleAllBtn.onclick = () => {
     const content = getNodeContent(node, elements);
-    const contentHash = content ? content.length + "_" + content.slice(0, 100) : "";
-    const widget = node.widgets?.find(w => w.name === "excluded_indices");
-    if (!widget) return;
+    const metaWidget = node.widgets?.find(w => w.name === "viewer_meta");
+    if (!metaWidget) return;
     
-    let data = { hash: contentHash, excluded: [] };
+    let meta = { lastInputHash: "", excluded: [] };
     try {
-      const parsed = JSON.parse(widget.value || "{}");
-      if (parsed && typeof parsed === "object" && parsed.hash !== undefined) {
-        data = parsed;
-      }
+      meta = JSON.parse(metaWidget.value || "{}");
+      if (!Array.isArray(meta.excluded)) meta.excluded = [];
     } catch {}
     
     const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
     const items = content.split(LIST_SEPARATOR);
-    const allChecked = data.excluded.length === 0;
+    const allChecked = meta.excluded.length === 0;
     
     if (allChecked) {
-      data.excluded = items.map((_, i) => i);
+      meta.excluded = items.map((_, i) => i);
       toggleAllBtn.textContent = "☐";
       toggleAllBtn.title = "Check All";
     } else {
-      data.excluded = [];
+      meta.excluded = [];
       toggleAllBtn.textContent = "☑";
       toggleAllBtn.title = "Uncheck All";
     }
     
-    widget.value = JSON.stringify(data);
+    metaWidget.value = JSON.stringify(meta);
     elements.lastContentHash = "";
     node.setDirtyCanvas?.(true, true);
     updateIframeContent(node, elements);
@@ -919,12 +926,11 @@ function createControlsBar(node, elements) {
         elements.textarea.style.display = "none";
       }
       setWidgetValue(node, "manual_content", newContent);
-      elements.hasBackendContent = false;
-      elements.hasUserEdits = true;
       elements.lastContentHash = "";
       elements.isEditing = false;
       elements.iframe.style.display = "block";
       editBtn.textContent = "Edit";
+      
       node.setDirtyCanvas?.(true, true);
       app.graph?.change?.();
       updateIframeContent(node, elements);
@@ -1197,8 +1203,6 @@ function ensureElementsForNode(node) {
     toggleAllBtn: null,
     lastContentHash: "",
     isEditing: false,
-    hasBackendContent: false,
-    hasUserEdits: false,
     listEditContainer: null,
     listTextareas: null,
   };
@@ -1359,17 +1363,20 @@ function updateIframeContent(node, elements) {
   const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
   const isListContent = content && content.includes(LIST_SEPARATOR);
   
+  let excluded = [];
+  const metaWidget = node.widgets?.find(w => w.name === "viewer_meta");
+  if (metaWidget?.value) {
+    try {
+      const meta = JSON.parse(metaWidget.value);
+      excluded = Array.isArray(meta.excluded) ? meta.excluded : [];
+    } catch {}
+  }
+  
   if (elements.toggleAllBtn) {
     elements.toggleAllBtn.style.display = isListContent ? "block" : "none";
     if (isListContent) {
-      const excludedWidget = node.widgets?.find(w => w.name === "excluded_indices");
-      let excludedCount = 0;
-      try {
-        const parsed = JSON.parse(excludedWidget?.value || "{}");
-        if (parsed?.excluded) excludedCount = parsed.excluded.length;
-      } catch {}
-      elements.toggleAllBtn.textContent = excludedCount === 0 ? "☑" : "☐";
-      elements.toggleAllBtn.title = excludedCount === 0 ? "Uncheck All" : "Check All";
+      elements.toggleAllBtn.textContent = excluded.length === 0 ? "☑" : "☐";
+      elements.toggleAllBtn.title = excluded.length === 0 ? "Uncheck All" : "Check All";
     }
   }
 
@@ -1377,28 +1384,6 @@ function updateIframeContent(node, elements) {
     const emptyHtml = buildIframeContent("<p style='opacity:0.5;text-align:center;margin-top:40px;'>No content. Click Edit to add content or connect a STRING input.</p>", "html", theme);
     elements.iframe.srcdoc = emptyHtml;
     return;
-  }
-
-  let excluded = [];
-  const excludedWidget = node.widgets?.find(w => w.name === "excluded_indices");
-  if (excludedWidget?.value) {
-    try {
-      const parsed = JSON.parse(excludedWidget.value);
-      if (parsed && typeof parsed === "object" && parsed.hash !== undefined) {
-        if (parsed.hash === contentHash) {
-          excluded = Array.isArray(parsed.excluded) ? parsed.excluded : [];
-        } else {
-          excludedWidget.value = JSON.stringify({ hash: contentHash, excluded: [] });
-        }
-      } else if (Array.isArray(parsed)) {
-        excluded = parsed;
-        excludedWidget.value = JSON.stringify({ hash: contentHash, excluded: parsed });
-      }
-    } catch {
-      excludedWidget.value = JSON.stringify({ hash: contentHash, excluded: [] });
-    }
-  } else if (excludedWidget) {
-    excludedWidget.value = JSON.stringify({ hash: contentHash, excluded: [] });
   }
   const html = buildIframeContent(content, contentType, theme, excluded);
   
@@ -1434,24 +1419,19 @@ window.addEventListener("message", (event) => {
       if (elements.iframe?.contentWindow === event.source) {
         const node = app.graph?.getNodeById(parseInt(nodeId));
         if (node) {
-          const widget = node.widgets?.find(w => w.name === "excluded_indices");
-          if (widget) {
-            let data = { hash: "", excluded: [] };
+          const metaWidget = node.widgets?.find(w => w.name === "viewer_meta");
+          if (metaWidget) {
+            let meta = { lastInputHash: "", excluded: [] };
             try {
-              const parsed = JSON.parse(widget.value || "{}");
-              if (parsed && typeof parsed === "object" && parsed.hash !== undefined) {
-                data = parsed;
-              } else if (Array.isArray(parsed)) {
-                data.excluded = parsed;
-              }
+              meta = JSON.parse(metaWidget.value || "{}");
+              if (!Array.isArray(meta.excluded)) meta.excluded = [];
             } catch {}
-            if (!Array.isArray(data.excluded)) data.excluded = [];
             if (checked) {
-              data.excluded = data.excluded.filter(i => i !== idx);
+              meta.excluded = meta.excluded.filter(i => i !== idx);
             } else {
-              if (!data.excluded.includes(idx)) data.excluded.push(idx);
+              if (!meta.excluded.includes(idx)) meta.excluded.push(idx);
             }
-            widget.value = JSON.stringify(data);
+            metaWidget.value = JSON.stringify(meta);
             node.setDirtyCanvas?.(true, true);
           }
         }
@@ -1489,14 +1469,14 @@ app.registerExtension({
           manualWidget.serializeValue = () => manualWidget.value;
         }
 
-        let excludedWidget = this.widgets?.find((w) => w.name === "excluded_indices");
-        if (!excludedWidget) {
-          excludedWidget = this.addWidget("text", "excluded_indices", "[]", () => {});
+        let metaWidget = this.widgets?.find((w) => w.name === "viewer_meta");
+        if (!metaWidget) {
+          metaWidget = this.addWidget("text", "viewer_meta", JSON.stringify({ lastInputHash: "", excluded: [] }), () => {});
         }
-        if (excludedWidget) {
-          excludedWidget.type = "hidden";
-          excludedWidget.computeSize = () => [0, -4];
-          excludedWidget.serializeValue = () => excludedWidget.value;
+        if (metaWidget) {
+          metaWidget.type = "hidden";
+          metaWidget.computeSize = () => [0, -4];
+          metaWidget.serializeValue = () => metaWidget.value;
         }
 
         for (const w of this.widgets || []) {
@@ -1569,8 +1549,6 @@ app.registerExtension({
           const elements = STATE.nodeIdToElements.get(String(this.id));
           if (elements) {
             elements.lastContentHash = "";
-            elements.hasBackendContent = false;
-            elements.hasUserEdits = false;
           }
           
           const node = this;
@@ -1609,10 +1587,18 @@ app.registerExtension({
             }
           }
         }
-        const elements = STATE.nodeIdToElements.get(String(this.id));
-        if (elements) {
-          elements.lastContentHash = "";
-        }
+        const node = this;
+        setTimeout(() => {
+          try {
+            const elements = ensureElementsForNode(node);
+            if (elements) {
+              elements.lastContentHash = "";
+              updateIframeContent(node, elements);
+            }
+          } catch (e) {
+            console.error("[WAS Viewer] onConfigure delayed update error:", e);
+          }
+        }, 100);
       } catch (e) {
         console.error("[WAS Viewer] onConfigure error:", e);
       }
@@ -1623,20 +1609,46 @@ app.registerExtension({
     nodeType.prototype.onExecuted = function (message) {
       const r = oldOnExecuted ? oldOnExecuted.apply(this, arguments) : undefined;
       try {
-        const msgStr = JSON.stringify(message);
-        console.log("[WAS Viewer] onExecuted message:", msgStr?.slice(0, 256));
-        const newContent = message?.text?.[0];
-        console.log("[WAS Viewer] newContent length:", newContent?.length, "preview:", newContent?.slice(0, 256));
-        if (newContent !== undefined && newContent !== null && newContent !== "") {
-          setWidgetValue(this, "manual_content", String(newContent));
+        const displayText = message?.text?.[0];
+        const sourceContent = message?.source_content?.[0] || "";
+        const sourceContentHash = message?.content_hash?.[0] || "";
+        
+        const metaWidget = this.widgets?.find(w => w.name === "viewer_meta");
+        let meta = { lastInputHash: "", excluded: [] };
+        try {
+          meta = JSON.parse(metaWidget?.value || "{}");
+          if (!meta.lastInputHash) meta.lastInputHash = "";
+          if (!Array.isArray(meta.excluded)) meta.excluded = [];
+        } catch {}
+        
+        if (sourceContentHash && meta.lastInputHash === sourceContentHash) {
+          console.log("[WAS Viewer] onExecuted: source content hash unchanged (cached), skipping update");
+          return r;
+        }
+        
+        if (sourceContent) {
+          console.log("[WAS Viewer] onExecuted: new source content, hash:", sourceContentHash, "preview:", sourceContent?.slice(0, 256));
+          
+          meta.lastInputHash = sourceContentHash;
+          meta.excluded = [];
+          if (metaWidget) {
+            metaWidget.value = JSON.stringify(meta);
+          }
+          
+          setWidgetValue(this, "manual_content", sourceContent);
           const elements = STATE.nodeIdToElements.get(String(this.id));
           if (elements) {
-            elements.hasBackendContent = true;
             elements.lastContentHash = "";
             updateIframeContent(this, elements);
           }
-        } else {
-          console.log("[WAS Viewer] Skipping empty content");
+        } else if (displayText !== undefined && displayText !== null && displayText !== "") {
+          console.log("[WAS Viewer] onExecuted: no source content, using display text");
+          setWidgetValue(this, "manual_content", String(displayText));
+          const elements = STATE.nodeIdToElements.get(String(this.id));
+          if (elements) {
+            elements.lastContentHash = "";
+            updateIframeContent(this, elements);
+          }
         }
       } catch (e) {
         console.error("[WAS Viewer] onExecuted error:", e);

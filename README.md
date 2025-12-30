@@ -5,6 +5,17 @@
 
 A versatile ComfyUI custom node that renders HTML, SVG, Markdown, and code content in a secure embedded iframe viewer with full editing, download, and list support.
 
+<details>
+<summary><strong>Screenshots</strong></summary>
+
+![Screenshot 1](screenshots/screenshot_1.jpg)
+![Screenshot 2](screenshots/screenshot_2.gif)
+![Screenshot 3](screenshots/screenshot_3.jpg)
+![Screenshot 4](screenshots/screenshot_4.jpg)
+![Screenshot 5](screenshots/screenshot_5.jpg)
+
+</details>
+
 ## Features
 
 ### Content Rendering
