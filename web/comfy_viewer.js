@@ -712,16 +712,31 @@ function ensureCleanupRunning() {
 
 function getContainer() {
   if (STATE.container) return STATE.container;
+  
+  const canvasEl = app.canvas?.canvas;
+  const canvasParent = canvasEl?.parentElement;
+  
+  if (!canvasParent) {
+    return null;
+  }
+  
+  if (getComputedStyle(canvasParent).position === "static") {
+    canvasParent.style.position = "relative";
+  }
+  
   const el = document.createElement("div");
   el.id = "was-viewer-overlay";
-  el.style.position = "absolute";
-  el.style.left = "0";
-  el.style.top = "0";
-  el.style.width = "0";
-  el.style.height = "0";
-  el.style.pointerEvents = "none";
-  el.style.zIndex = "100";
-  document.body.appendChild(el);
+  el.style.cssText = `
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 100;
+    overflow: hidden;
+  `;
+  canvasParent.appendChild(el);
   STATE.container = el;
   return el;
 }
@@ -1269,12 +1284,13 @@ function updateElementsRect(node, elements) {
   if (!canvasEl) return;
 
   const rect = canvasEl.getBoundingClientRect();
+  
   const ds = canvas.ds;
   const scale = ds?.scale ?? 1;
   const offset = ds?.offset ?? [0, 0];
 
-  const x = rect.left + (node.pos[0] + offset[0]) * scale;
-  const y = rect.top + (node.pos[1] + offset[1]) * scale;
+  const x = (node.pos[0] + offset[0]) * scale;
+  const y = (node.pos[1] + offset[1]) * scale;
   const w = node.size[0] * scale;
   const h = node.size[1] * scale;
 
@@ -1289,8 +1305,8 @@ function updateElementsRect(node, elements) {
   const insetX = 8;
   const insetBottom = 8;
   
-  const innerX = x + (insetX * scale);
-  const innerY = y + ((titleHRaw - 5) * scale);
+  const innerX = x + insetX * scale;
+  const innerY = y + (titleHRaw - 5) * scale;
   const innerW = (node.size[0] - insetX * 2);
   const innerH = (node.size[1] - titleHRaw + 5 - insetBottom);
 
@@ -1308,7 +1324,11 @@ function updateElementsRect(node, elements) {
 
   const isCollapsed = !!node.flags?.collapsed;
   const hasArea = nw >= 2 && nh >= 2;
-  elements.wrapper.style.display = !isCollapsed && hasArea ? "flex" : "none";
+  
+  const isOffScreen = (x + w < 0) || (x > rect.width) || 
+                      (y + h < 0) || (y > rect.height);
+  
+  elements.wrapper.style.display = (!isCollapsed && hasArea && !isOffScreen) ? "flex" : "none";
 }
 
 function updateIframeContent(node, elements) {
@@ -1603,9 +1623,10 @@ app.registerExtension({
     nodeType.prototype.onExecuted = function (message) {
       const r = oldOnExecuted ? oldOnExecuted.apply(this, arguments) : undefined;
       try {
-        console.log("[WAS Viewer] onExecuted message:", JSON.stringify(message));
+        const msgStr = JSON.stringify(message);
+        console.log("[WAS Viewer] onExecuted message:", msgStr?.slice(0, 256));
         const newContent = message?.text?.[0];
-        console.log("[WAS Viewer] newContent length:", newContent?.length, "full:", newContent);
+        console.log("[WAS Viewer] newContent length:", newContent?.length, "preview:", newContent?.slice(0, 256));
         if (newContent !== undefined && newContent !== null && newContent !== "") {
           setWidgetValue(this, "manual_content", String(newContent));
           const elements = STATE.nodeIdToElements.get(String(this.id));
