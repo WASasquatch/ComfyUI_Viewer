@@ -1,6 +1,6 @@
 # ComfyUI Content Viewer
 
-![Content Viewer](https://img.shields.io/badge/ComfyUI-Content_Viewer-blue)
+![Content Viewer](https://img.shields.io/badge/ComfyUI-Custom_Node-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 A versatile ComfyUI custom node that renders HTML, SVG, Markdown, and code content in a secure embedded iframe viewer with full editing, download, and list support.
@@ -70,7 +70,7 @@ A versatile ComfyUI custom node that renders HTML, SVG, Markdown, and code conte
 When connecting a node that outputs multiple strings:
 1. Each string displays in its own container with an index label
 2. Click the copy button on any item to copy just that content
-3. Click **Edit** to modify individual items in separate textareas
+3. Click **Edit** to modify individual items
 4. Click **Download** to get a `.zip` file with each item as a separate file
 
 ## Supported Content Types
@@ -78,7 +78,7 @@ When connecting a node that outputs multiple strings:
 | Type | Detection | File Extension |
 |------|-----------|----------------|
 | **HTML** | `<!DOCTYPE`, `<html`, or common HTML tags | `.html` |
-| **SVG** | `<svg` tag with optional XML declaration | `.svg` |
+| **SVG** | `<svg` tag with optional XML declaration and valid xmlns attribute | `.svg` |
 | **Markdown** | Headers (`#`), lists, links, images (`![]()`), code blocks, tables | `.md` |
 | **Python** | `import`, `def`, `class`, `self.` | `.py` |
 | **JavaScript** | `function`, `const`, `let`, `var`, arrow functions | `.js` |

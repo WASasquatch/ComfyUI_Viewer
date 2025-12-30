@@ -68,7 +68,9 @@ function detectContentType(content) {
       (trimmed.includes("<div") || trimmed.includes("<span") || trimmed.includes("<p>") ||
        trimmed.includes("<h1") || trimmed.includes("<h2") || trimmed.includes("<table") ||
        trimmed.includes("<ul") || trimmed.includes("<ol") || trimmed.includes("<img") ||
-       trimmed.includes("<a ") || trimmed.includes("<br") || trimmed.includes("<hr"))) {
+       trimmed.includes("<a ") || trimmed.includes("<br") || trimmed.includes("<hr") ||
+       trimmed.includes("<em>") || trimmed.includes("<strong>") || trimmed.includes("<b>") ||
+       trimmed.includes("<i>") || trimmed.includes("<code>") || trimmed.includes("<pre>"))) {
     return "html";
   }
 
@@ -148,14 +150,14 @@ function parseMarkdown(md) {
   html = html.replace(/^##\s+(.*)$/gm, "<h2>$1</h2>");
   html = html.replace(/^#\s+(.*)$/gm, "<h1>$1</h1>");
 
+  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;">');
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+
   html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   html = html.replace(/__(.+?)__/g, "<strong>$1</strong>");
   html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  html = html.replace(/_([^_]+)_/g, "<em>$1</em>");
+  html = html.replace(/(?<![a-zA-Z0-9\/_])_([^_\s][^_]*)_(?![a-zA-Z0-9\/_])/g, "<em>$1</em>");
   html = html.replace(/~~(.+?)~~/g, "<del>$1</del>");
-
-  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;">');
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
 
   html = html.replace(/^>\s+(.*)$/gm, "<blockquote>$1</blockquote>");
 
@@ -172,10 +174,31 @@ function parseMarkdown(md) {
   html = html.replace(/^---$/gm, "<hr>");
   html = html.replace(/^\*\*\*$/gm, "<hr>");
 
+  html = html.replace(/^(\|.+\|)\n(\|[-:\s|]+\|)\n((?:\|.+\|\n?)+)/gm, (match, headerRow, separatorRow, bodyRows) => {
+    const parseRow = (row, cellTag) => {
+      const cells = row.split("|").slice(1, -1);
+      return `<tr>${cells.map(c => `<${cellTag}>${c.trim()}</${cellTag}>`).join("")}</tr>`;
+    };
+    const alignments = separatorRow.split("|").slice(1, -1).map(cell => {
+      const trimmed = cell.trim();
+      if (trimmed.startsWith(":") && trimmed.endsWith(":")) return "center";
+      if (trimmed.endsWith(":")) return "right";
+      return "left";
+    });
+    const headerCells = headerRow.split("|").slice(1, -1);
+    const theadRow = `<tr>${headerCells.map((c, i) => `<th style="text-align:${alignments[i] || "left"}">${c.trim()}</th>`).join("")}</tr>`;
+    const bodyRowsArray = bodyRows.trim().split("\n");
+    const tbodyRows = bodyRowsArray.map(row => {
+      const cells = row.split("|").slice(1, -1);
+      return `<tr>${cells.map((c, i) => `<td style="text-align:${alignments[i] || "left"}">${c.trim()}</td>`).join("")}</tr>`;
+    }).join("");
+    return `<table><thead>${theadRow}</thead><tbody>${tbodyRows}</tbody></table>`;
+  });
+
   html = html.replace(/\n\n/g, "</p><p>");
   html = "<p>" + html + "</p>";
-  html = html.replace(/<p>\s*<(h[1-6]|ul|ol|pre|blockquote|hr)/g, "<$1");
-  html = html.replace(/<\/(h[1-6]|ul|ol|pre|blockquote)>\s*<\/p>/g, "</$1>");
+  html = html.replace(/<p>\s*<(h[1-6]|ul|ol|pre|blockquote|hr|table)/g, "<$1");
+  html = html.replace(/<\/(h[1-6]|ul|ol|pre|blockquote|table)>\s*<\/p>/g, "</$1>");
   html = html.replace(/<p>\s*<\/p>/g, "");
 
   return html;
@@ -325,6 +348,7 @@ function buildIframeContent(content, contentType, theme) {
       border-collapse: collapse;
       width: 100%;
       margin: 12px 0;
+      border: 1px solid ${theme.border};
     }
     th, td {
       border: 1px solid ${theme.border};
@@ -332,6 +356,7 @@ function buildIframeContent(content, contentType, theme) {
       text-align: left;
     }
     th { background: rgba(0,0,0,0.2); }
+    tr:last-child td { border-bottom: 1px solid ${theme.border}; }
     hr {
       border: none;
       border-top: 1px solid ${theme.border};
