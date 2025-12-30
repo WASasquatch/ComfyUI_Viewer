@@ -1,0 +1,25 @@
+[project]
+name = "ComfyUI_Viewer"
+version = "0.0.1"
+description = "ComfyUI Content Viewer - Renders HTML, Markdown, and code in an iframe"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT License" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent"
+]
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[project.urls]
+Repository = "https://github.com/WASasquatch/ComfyUI_Viewer"
+"Bug Tracker" = "https://github.com/WASasquatch/ComfyUI_Viewer/issues"
+
+[tool.comfy]
+PublisherId = "was"
+DisplayName = "ComfyUI Content Viewer"
+requires-comfyui = ">=1.0.0"
