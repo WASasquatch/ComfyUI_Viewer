@@ -15,7 +15,7 @@ A versatile ComfyUI custom node that renders HTML, SVG, Markdown, and code conte
 - **ComfyUI theme integration** - Automatically matches ComfyUI's theme colors
 
 ### List Support
-- **Multiple items** - Displays list inputs as individual indexed containers
+- **Multiple items** - Displays list inputs as individual indexed containers, filter what items to output.
 - **Per-item copy buttons** - Copy individual list items to clipboard
 - **Per-item editing** - Edit each list item in its own textarea
 - **List separator** - Items joined/split using `---LIST_SEPARATOR---`
