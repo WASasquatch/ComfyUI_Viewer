@@ -20,10 +20,15 @@ A versatile ComfyUI custom node that renders HTML, SVG, Markdown, and code conte
 ## Features
 
 ### Content Rendering
-- **Auto-detection** of content type: HTML, SVG, Markdown, Python, JavaScript, CSS, or plain text
+- **Auto-detection** of content type: HTML, SVG, Markdown, JSON, YAML, CSV, Python, JavaScript, CSS, Terminal (ANSI), or plain text
 - **SVG support** - Renders SVG graphics centered in the viewport
-- **Markdown parsing** - Full support for headers, lists, links, images, code blocks, tables, and emphasis
-- **Code formatting** - Code content displayed with monospace font in styled blocks
+- **Markdown parsing** - Full support for headers, lists, links, images, code blocks, tables, emphasis, and Mermaid diagrams
+- **JSON viewer** - Collapsible tree view with syntax highlighting
+- **CSV/Tables** - Automatic table rendering with styled headers
+- **YAML** - Syntax highlighted display
+- **LaTeX/Math** - Renders mathematical formulas using KaTeX (`$$...$$` or `$...$`)
+- **Terminal output** - Parses ANSI escape codes for colored terminal logs
+- **Code formatting** - Code content displayed with monospace font and Prism.js syntax highlighting
 - **ComfyUI theme integration** - Automatically matches ComfyUI's theme colors
 
 ### List Support

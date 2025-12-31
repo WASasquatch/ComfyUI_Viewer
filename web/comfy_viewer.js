@@ -14,6 +14,10 @@ const STATE = {
   cleanupListenersAttached: false,
   lastScale: 1,
   prismScripts: null,
+  mermaidScript: null,
+  katexCore: null,
+  katexAutoRender: null,
+  katexCss: null,
 };
 
 const PRISM_FILES = [
@@ -25,6 +29,10 @@ const PRISM_FILES = [
   "prism-json.min.txt",
   "prism-bash.min.txt",
 ];
+
+const MERMAID_FILE = "mermaid.min.txt";
+const KATEX_FILES = ["katex.min.txt", "katex-auto-render.min.txt"];
+const KATEX_CSS_FILE = "katex-with-fonts.min.css.txt";
 
 async function loadPrismScripts() {
   if (STATE.prismScripts) return STATE.prismScripts;
@@ -46,6 +54,61 @@ async function loadPrismScripts() {
 }
 
 loadPrismScripts();
+
+async function loadMermaidScript() {
+  if (STATE.mermaidScript) return STATE.mermaidScript;
+  
+  try {
+    const basePath = import.meta.url.substring(0, import.meta.url.lastIndexOf("/"));
+    const res = await fetch(`${basePath}/${MERMAID_FILE}`);
+    STATE.mermaidScript = res.ok ? await res.text() : "";
+    return STATE.mermaidScript;
+  } catch (e) {
+    console.error("[WAS Viewer] Failed to load Mermaid script:", e);
+    return "";
+  }
+}
+
+async function loadKatexScripts() {
+  if (STATE.katexCore && STATE.katexAutoRender && STATE.katexCss) return true;
+  
+  try {
+    const basePath = import.meta.url.substring(0, import.meta.url.lastIndexOf("/"));
+    const [katexCore, autoRender, katexCss] = await Promise.all([
+      fetch(`${basePath}/${KATEX_FILES[0]}`).then(r => r.ok ? r.text() : ""),
+      fetch(`${basePath}/${KATEX_FILES[1]}`).then(r => r.ok ? r.text() : ""),
+      fetch(`${basePath}/${KATEX_CSS_FILE}`).then(r => r.ok ? r.text() : "")
+    ]);
+    STATE.katexCore = katexCore;
+    STATE.katexAutoRender = autoRender;
+    STATE.katexCss = katexCss;
+    return true;
+  } catch (e) {
+    console.error("[WAS Viewer] Failed to load KaTeX scripts:", e);
+    return false;
+  }
+}
+
+function refreshAllViewers() {
+  for (const [nodeId, elements] of STATE.nodeIdToElements.entries()) {
+    if (elements && elements.lastContentHash) {
+      elements.lastContentHash = "";
+      const node = app?.graph?.getNodeById(parseInt(nodeId));
+      if (node) {
+        try {
+          updateIframeContent(node, elements);
+        } catch (e) {}
+      }
+    }
+  }
+}
+
+loadMermaidScript().then(() => {
+  if (STATE.mermaidScript) refreshAllViewers();
+});
+loadKatexScripts().then(() => {
+  if (STATE.katexCore && STATE.katexCss) refreshAllViewers();
+});
 
 function simpleHash(str) {
   let hash = 0;
@@ -106,7 +169,43 @@ function detectContentType(content) {
     return "html";
   }
 
-  const scores = { html: 0, markdown: 0, python: 0, javascript: 0, css: 0 };
+  const scores = { html: 0, markdown: 0, python: 0, javascript: 0, css: 0, json: 0, yaml: 0, csv: 0, ansi: 0 };
+  
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      JSON.parse(trimmed);
+      return "json";
+    } catch {}
+  }
+  
+  if (/\x1b\[[\d;]*m/.test(trimmed) || /\033\[[\d;]*m/.test(trimmed)) {
+    return "ansi";
+  }
+  
+  const lines = trimmed.split("\n");
+  const csvLines = lines.filter(l => l.includes(",") && !l.includes("{") && !l.includes("<"));
+  if (csvLines.length >= 2) {
+    const firstLineCommas = (lines[0].match(/,/g) || []).length;
+    if (firstLineCommas >= 1) {
+      const consistentCommas = csvLines.filter(l => (l.match(/,/g) || []).length === firstLineCommas).length;
+      if (consistentCommas >= csvLines.length * 0.8) {
+        scores.csv += 5;
+      }
+    }
+  }
+  
+  const yamlPatterns = [
+    [/^[\w-]+:\s*.+$/m, 2],
+    [/^[\w-]+:\s*$/m, 2],
+    [/^\s+-\s+.+$/m, 1],
+    [/^---\s*$/m, 3],
+  ];
+  for (const [pattern, weight] of yamlPatterns) {
+    if (pattern.test(trimmed)) scores.yaml += weight;
+  }
+  if (trimmed.includes(": ") && !trimmed.includes("{") && !trimmed.includes("<")) {
+    scores.yaml += 1;
+  }
 
   const htmlTags = ["<div", "<span", "<p>", "<h1", "<h2", "<h3", "<table", "<ul", "<ol", 
                     "<img", "<a ", "<br", "<hr", "<em>", "<strong>", "<b>", "<i>", "<code>", "<pre>"];
@@ -198,8 +297,59 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function parseNestedList(match, listTag, itemTag) {
+  const regex = new RegExp(`<${itemTag}[^>]*data-level="(\\d+)"[^>]*(?:class="([^"]*)")?[^>]*>(.*?)<\\/${itemTag}>`, 'g');
+  const items = [];
+  let m;
+  while ((m = regex.exec(match)) !== null) {
+    items.push({ level: parseInt(m[1]), className: m[2] || '', content: m[3] });
+  }
+  
+  if (items.length === 0) return match;
+  
+  let result = '';
+  let stack = [];
+  
+  for (const item of items) {
+    while (stack.length > 0 && stack[stack.length - 1] > item.level) {
+      result += `</li></${listTag}>`;
+      stack.pop();
+    }
+    
+    if (stack.length === 0 || stack[stack.length - 1] < item.level) {
+      result += `<${listTag}>`;
+      stack.push(item.level);
+    } else if (stack[stack.length - 1] === item.level && result.length > 0) {
+      result += '</li>';
+    }
+    
+    const classAttr = item.className ? ` class="${item.className}"` : '';
+    result += `<li${classAttr}>${item.content}`;
+  }
+  
+  while (stack.length > 0) {
+    result += `</li></${listTag}>`;
+    stack.pop();
+  }
+  
+  return result;
+}
+
 function parseMarkdown(md) {
   let html = md;
+
+  // Normalize mixed LaTeX delimiters: $$\(...\)$$ -> $$...$$ and $$\[...\]$$ -> $$...$$
+  html = html.replace(/\$\$\s*\\\(([^]*?)\\\)\s*\$\$/g, '$$$$$1$$$$');
+  html = html.replace(/\$\$\s*\\\[([^]*?)\\\]\s*\$\$/g, '$$$$$1$$$$');
+  
+  // Convert inline $$...$$ to $...$ when surrounded by text on same line (not at line start/end)
+  html = html.replace(/([^\n$])\$\$([^$\n]+)\$\$([^\n$])/g, '$1$$$2$$$3');
+
+  html = html.replace(/^```(?:mermaid|flow|flex)(?:\[([^\]]*)\])?\n([\s\S]*?)```$/gm, (_, options, code) => {
+    const centered = options && options.toLowerCase().includes('center');
+    const style = centered ? 'text-align:center;' : 'text-align:left;';
+    return `<div class="mermaid" style="${style}">${code.trim()}</div>`;
+  });
 
   html = html.replace(/^```(\w*)\n([\s\S]*?)```$/gm, (_, lang, code) => {
     return `<pre><code class="language-${lang || "text"}">${escapeHtml(code.trim())}</code></pre>`;
@@ -207,12 +357,15 @@ function parseMarkdown(md) {
 
   html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
 
-  html = html.replace(/^######\s+(.*)$/gm, "<h6>$1</h6>");
-  html = html.replace(/^#####\s+(.*)$/gm, "<h5>$1</h5>");
-  html = html.replace(/^####\s+(.*)$/gm, "<h4>$1</h4>");
-  html = html.replace(/^###\s+(.*)$/gm, "<h3>$1</h3>");
-  html = html.replace(/^##\s+(.*)$/gm, "<h2>$1</h2>");
-  html = html.replace(/^#\s+(.*)$/gm, "<h1>$1</h1>");
+  html = html.replace(/^(.+)\n=+\s*$/gm, "<h1>$1</h1>");
+  html = html.replace(/^(.+)\n-+\s*$/gm, "<h2>$1</h2>");
+
+  html = html.replace(/^######\s*(.+)$/gm, "<h6>$1</h6>");
+  html = html.replace(/^#####\s*(.+)$/gm, "<h5>$1</h5>");
+  html = html.replace(/^####\s*(.+)$/gm, "<h4>$1</h4>");
+  html = html.replace(/^###\s*(.+)$/gm, "<h3>$1</h3>");
+  html = html.replace(/^##\s*(.+)$/gm, "<h2>$1</h2>");
+  html = html.replace(/^#\s*(.+)$/gm, "<h1>$1</h1>");
 
   html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;">');
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
@@ -225,14 +378,31 @@ function parseMarkdown(md) {
 
   html = html.replace(/^>\s+(.*)$/gm, "<blockquote>$1</blockquote>");
 
-  html = html.replace(/^\d+\.\s+(.*)$/gm, "<oli>$1</oli>");
-  html = html.replace(/(<oli>.*<\/oli>\n?)+/g, (match) => {
-    return "<ol>" + match.replace(/<\/?oli>/g, (tag) => tag.replace("oli", "li")) + "</ol>";
+  html = html.replace(/^(\s*)- \[x\]\s+(.*)$/gim, (_, indent, text) => {
+    const level = Math.floor(indent.length / 2);
+    return `<uli data-level="${level}" class="task-item checked"><input type="checkbox" checked disabled> ${text}</uli>`;
+  });
+  html = html.replace(/^(\s*)- \[ \]\s+(.*)$/gm, (_, indent, text) => {
+    const level = Math.floor(indent.length / 2);
+    return `<uli data-level="${level}" class="task-item"><input type="checkbox" disabled> ${text}</uli>`;
   });
 
-  html = html.replace(/^[-*+]\s+(.*)$/gm, "<uli>$1</uli>");
-  html = html.replace(/(<uli>.*<\/uli>\n?)+/g, (match) => {
-    return "<ul>" + match.replace(/<\/?uli>/g, (tag) => tag.replace("uli", "li")) + "</ul>";
+  html = html.replace(/^(\s*)\d+\.\s+(.*)$/gm, (_, indent, text) => {
+    const level = Math.floor(indent.length / 2);
+    return `<oli data-level="${level}">${text}</oli>`;
+  });
+
+  html = html.replace(/^(\s*)[-*+]\s+(.*)$/gm, (_, indent, text) => {
+    const level = Math.floor(indent.length / 2);
+    return `<uli data-level="${level}">${text}</uli>`;
+  });
+
+  html = html.replace(/(<oli[^>]*>.*?<\/oli>\s*)+/g, (match) => {
+    return parseNestedList(match, 'ol', 'oli');
+  });
+
+  html = html.replace(/(<uli[^>]*>.*?<\/uli>\s*)+/g, (match) => {
+    return parseNestedList(match, 'ul', 'uli');
   });
 
   html = html.replace(/^---$/gm, "<hr>");
@@ -273,10 +443,106 @@ function renderCodeContent(content, language) {
     python: "python",
     javascript: "javascript",
     css: "css",
+    yaml: "yaml",
     text: "plaintext",
   };
   const lang = langMap[language] || "plaintext";
   return `<pre><code class="language-${lang}">${escapeHtml(content)}</code></pre>`;
+}
+
+function renderJsonTree(data, depth = 0) {
+  const indent = "  ".repeat(depth);
+  if (data === null) return `<span class="json-null">null</span>`;
+  if (typeof data === "boolean") return `<span class="json-boolean">${data}</span>`;
+  if (typeof data === "number") return `<span class="json-number">${data}</span>`;
+  if (typeof data === "string") return `<span class="json-string">"${escapeHtml(data)}"</span>`;
+  
+  if (Array.isArray(data)) {
+    if (data.length === 0) return `<span class="json-bracket">[]</span>`;
+    const id = `json-${Math.random().toString(36).slice(2, 9)}`;
+    const items = data.map((item, i) => {
+      const comma = i < data.length - 1 ? "," : "";
+      return `${indent}  ${renderJsonTree(item, depth + 1)}${comma}`;
+    }).join("\n");
+    return `<span class="json-toggle" onclick="toggleJson('${id}')">[<span class="json-count">${data.length} items</span>]</span><div id="${id}" class="json-collapsible">\n${items}\n${indent}<span class="json-bracket">]</span></div>`;
+  }
+  
+  if (typeof data === "object") {
+    const keys = Object.keys(data);
+    if (keys.length === 0) return `<span class="json-bracket">{}</span>`;
+    const id = `json-${Math.random().toString(36).slice(2, 9)}`;
+    const items = keys.map((key, i) => {
+      const comma = i < keys.length - 1 ? "," : "";
+      return `${indent}  <span class="json-key">"${escapeHtml(key)}"</span>: ${renderJsonTree(data[key], depth + 1)}${comma}`;
+    }).join("\n");
+    return `<span class="json-toggle" onclick="toggleJson('${id}')">{<span class="json-count">${keys.length} keys</span>}</span><div id="${id}" class="json-collapsible">\n${items}\n${indent}<span class="json-bracket">}</span></div>`;
+  }
+  
+  return escapeHtml(String(data));
+}
+
+function renderCsvTable(content) {
+  const lines = content.trim().split("\n");
+  if (lines.length === 0) return `<pre>${escapeHtml(content)}</pre>`;
+  
+  const parseRow = (line) => {
+    const result = [];
+    let current = "";
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === "," && !inQuotes) {
+        result.push(current.trim());
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  };
+  
+  const headers = parseRow(lines[0]);
+  const rows = lines.slice(1).map(parseRow);
+  
+  const thead = `<thead><tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>`;
+  const tbody = `<tbody>${rows.map(row => 
+    `<tr>${row.map(cell => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`
+  ).join("")}</tbody>`;
+  
+  return `<div class="csv-container"><table class="csv-table">${thead}${tbody}</table></div>`;
+}
+
+function renderAnsiContent(content) {
+  const ansiColors = {
+    "30": "#000", "31": "#e74c3c", "32": "#2ecc71", "33": "#f39c12",
+    "34": "#3498db", "35": "#9b59b6", "36": "#1abc9c", "37": "#ecf0f1",
+    "90": "#7f8c8d", "91": "#ff6b6b", "92": "#69db7c", "93": "#ffd43b",
+    "94": "#74c0fc", "95": "#da77f2", "96": "#63e6be", "97": "#fff",
+  };
+  const bgColors = {
+    "40": "#000", "41": "#e74c3c", "42": "#2ecc71", "43": "#f39c12",
+    "44": "#3498db", "45": "#9b59b6", "46": "#1abc9c", "47": "#ecf0f1",
+  };
+  
+  let html = escapeHtml(content);
+  html = html.replace(/(?:\x1b|\033)\[([\d;]*)m/g, (match, codes) => {
+    if (!codes || codes === "0") return "</span>";
+    const parts = codes.split(";");
+    let style = "";
+    for (const code of parts) {
+      if (ansiColors[code]) style += `color:${ansiColors[code]};`;
+      if (bgColors[code]) style += `background:${bgColors[code]};`;
+      if (code === "1") style += "font-weight:bold;";
+      if (code === "3") style += "font-style:italic;";
+      if (code === "4") style += "text-decoration:underline;";
+    }
+    return style ? `<span style="${style}">` : "";
+  });
+  
+  return `<pre class="ansi-output">${html}</pre>`;
 }
 
 async function createZipBlob(files) {
@@ -427,12 +693,15 @@ function buildIframeContent(content, contentType, theme, excluded = []) {
       margin: 16px 0;
     }
     h1, h2, h3, h4, h5, h6 {
-      margin-top: 20px;
-      margin-bottom: 10px;
+      margin-top: 16px;
+      margin-bottom: 8px;
       color: ${theme.fg};
     }
-    ul, ol { padding-left: 24px; }
-    li { margin: 4px 0; }
+    h1:first-child, h2:first-child, h3:first-child, h4:first-child, h5:first-child, h6:first-child {
+      margin-top: 0;
+    }
+    ul, ol { padding-left: 24px; margin: 8px 0; }
+    li { margin: 2px 0; }
     .list-item {
       background: rgba(0,0,0,0.2);
       border: 1px solid ${theme.border};
@@ -500,6 +769,82 @@ function buildIframeContent(content, contentType, theme, excluded = []) {
     .list-content {
       white-space: pre-wrap;
       word-wrap: break-word;
+    }
+    .json-tree pre {
+      margin: 0;
+      white-space: pre-wrap;
+      font-size: 13px;
+    }
+    .json-key { color: #9cdcfe; }
+    .json-string { color: #ce9178; }
+    .json-number { color: #b5cea8; }
+    .json-boolean { color: #569cd6; }
+    .json-null { color: #569cd6; }
+    .json-bracket { color: ${theme.fg}; }
+    .json-toggle {
+      cursor: pointer;
+      user-select: none;
+    }
+    .json-toggle:hover { opacity: 0.8; }
+    .json-count {
+      color: #6a9955;
+      font-size: 11px;
+      margin-left: 4px;
+    }
+    .json-collapsible {
+      margin-left: 16px;
+    }
+    .json-collapsible.collapsed {
+      display: none;
+    }
+    .csv-container {
+      overflow-x: auto;
+    }
+    .csv-table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 13px;
+    }
+    .csv-table th, .csv-table td {
+      border: 1px solid ${theme.border};
+      padding: 8px 12px;
+      text-align: left;
+    }
+    .csv-table th {
+      background: rgba(0,0,0,0.3);
+      font-weight: bold;
+    }
+    .csv-table tr:nth-child(even) {
+      background: rgba(0,0,0,0.1);
+    }
+    .ansi-output {
+      background: #1e1e1e;
+      padding: 12px;
+      border-radius: 6px;
+      font-family: "Fira Code", Consolas, Monaco, monospace;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .mermaid {
+      background: transparent;
+      text-align: center;
+      padding: 16px;
+    }
+    .math-block {
+      text-align: center;
+      margin: 16px 0;
+      overflow-x: auto;
+    }
+    .task-item {
+      list-style: none;
+      margin-left: -20px;
+    }
+    .task-item input[type="checkbox"] {
+      margin-right: 8px;
+      accent-color: ${theme.accent};
+    }
+    .task-item.checked {
+      color: ${theme.fg};
     }
   `;
 
@@ -578,6 +923,23 @@ function buildIframeContent(content, contentType, theme, excluded = []) {
     case "svg":
       bodyContent = `<div style="display:flex;justify-content:center;align-items:center;min-height:100%;padding:16px;">${content}</div>`;
       break;
+    case "json":
+      try {
+        const parsed = JSON.parse(content);
+        bodyContent = `<div class="json-tree"><pre>${renderJsonTree(parsed)}</pre></div>`;
+      } catch {
+        bodyContent = renderCodeContent(content, "javascript");
+      }
+      break;
+    case "csv":
+      bodyContent = renderCsvTable(content);
+      break;
+    case "yaml":
+      bodyContent = renderCodeContent(content, "yaml");
+      break;
+    case "ansi":
+      bodyContent = renderAnsiContent(content);
+      break;
     case "python":
     case "javascript":
     case "css":
@@ -628,12 +990,54 @@ function buildIframeContent(content, contentType, theme, excluded = []) {
     .token.italic { font-style: italic; }
   `;
 
-  const needsPrism = ["python", "javascript", "css"].includes(contentType) || 
+  const needsPrism = ["python", "javascript", "css", "yaml"].includes(contentType) || 
                      content.includes("```") || content.includes("<code");
 
   const prismScripts = needsPrism && STATE.prismScripts ? `
     <script>${STATE.prismScripts}<\/script>
     <script>document.addEventListener('DOMContentLoaded', () => Prism.highlightAll());<\/script>
+  ` : "";
+
+  const jsonScript = contentType === "json" ? `
+    <script>
+      function toggleJson(id) {
+        const el = document.getElementById(id);
+        if (el) el.classList.toggle('collapsed');
+      }
+    <\/script>
+  ` : "";
+
+  const hasMermaid = /```(?:mermaid|flow|flex)/.test(content) || content.includes("<div class=\"mermaid\">");
+  const mermaidScript = hasMermaid && STATE.mermaidScript ? `
+    <script>${STATE.mermaidScript}<\/script>
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+      });
+    <\/script>
+  ` : "";
+
+  const hasLatex = content.includes("$$") || content.includes("\\(") || content.includes("\\[") || /\$[^$\n]+\$/.test(content);
+  const katexStyles = hasLatex && STATE.katexCss ? `<style>${STATE.katexCss}</style>` : "";
+  const katexScript = hasLatex && STATE.katexCore && STATE.katexAutoRender ? `
+    <script>${STATE.katexCore}<\/script>
+    <script>${STATE.katexAutoRender}<\/script>
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        if (typeof renderMathInElement === 'function') {
+          renderMathInElement(document.body, {
+            delimiters: [
+              {left: '$$', right: '$$', display: true},
+              {left: '$', right: '$', display: false},
+              {left: '\\\\(', right: '\\\\)', display: false},
+              {left: '\\\\[', right: '\\\\]', display: true}
+            ],
+            ignoredTags: ['script', 'noscript', 'style', 'textarea', 'option'],
+            throwOnError: false
+          });
+        }
+      });
+    <\/script>
   ` : "";
 
   return `<!DOCTYPE html>
@@ -642,7 +1046,11 @@ function buildIframeContent(content, contentType, theme, excluded = []) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>${baseStyles}${needsPrism ? prismTheme : ""}</style>
+  ${katexStyles}
   ${prismScripts}
+  ${jsonScript}
+  ${mermaidScript}
+  ${katexScript}
 </head>
 <body>${bodyContent}</body>
 </html>`;
@@ -1219,8 +1627,8 @@ function ensureElementsForNode(node) {
   `;
 
   const iframe = document.createElement("iframe");
-  iframe.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-modals allow-pointer-lock allow-downloads");
-  iframe.setAttribute("allow", "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen");
+  iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-pointer-lock allow-downloads");
+  iframe.setAttribute("allow", "fullscreen");
   iframe.setAttribute("allowfullscreen", "true");
   iframe.style.cssText = `
     position: absolute;
@@ -1355,6 +1763,10 @@ function updateIframeContent(node, elements) {
       python: "Python",
       javascript: "JavaScript",
       css: "CSS",
+      json: "JSON",
+      yaml: "YAML",
+      csv: "CSV",
+      ansi: "Terminal",
       text: "Text",
     };
     elements.typeLabel.textContent = `Type: ${typeNames[contentType] || "Unknown"}`;
