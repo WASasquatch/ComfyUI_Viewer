@@ -1,6 +1,6 @@
 [project]
 name = "ComfyUI_Viewer"
-version = "0.0.3"
+version = "0.0.4"
 description = "ComfyUI Content Viewer - Renders HTML, Markdown, and code in an iframe"
 readme = "README.md"
 requires-python = ">=3.10"
