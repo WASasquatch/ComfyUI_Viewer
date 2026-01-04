@@ -1,0 +1,84 @@
+/**
+ * List item styles for iframe content
+ * Uses CSS custom properties for theming: --theme-bg, --theme-fg, --theme-border, --theme-accent
+ */
+
+.list-item {
+  background: rgba(0,0,0,0.2);
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 8px;
+  position: relative;
+}
+
+.list-item:last-child { margin-bottom: 0; }
+
+.list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.list-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.list-checkbox {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--theme-accent);
+}
+
+.list-index {
+  display: inline-block;
+  background: var(--theme-accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: bold;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.list-item.excluded {
+  opacity: 0.5;
+}
+
+.list-item.excluded .list-index {
+  background: #666;
+}
+
+.copy-btn {
+  background: transparent;
+  border: 1px solid var(--theme-border);
+  border-radius: 4px;
+  color: var(--theme-fg);
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.2s;
+}
+
+.copy-btn:hover {
+  background: var(--theme-accent);
+  color: #fff;
+  border-color: var(--theme-accent);
+}
+
+.copy-btn.copied {
+  background: #22c55e;
+  border-color: #22c55e;
+  color: #fff;
+}
+
+.list-content {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}

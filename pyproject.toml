@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI_Viewer"
-version = "0.0.4"
-description = "ComfyUI Content Viewer - Renders HTML, Markdown, and code in an iframe"
+version = "0.2.0"
+description = "Extensible content viewer for ComfyUI: HTML, Markdown (LaTeX, Mermaid, etc), Code, Images, and more"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT License" }

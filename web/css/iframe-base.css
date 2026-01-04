@@ -1,0 +1,93 @@
+/**
+ * Base styles for iframe content
+ * Uses CSS custom properties for theming: --theme-bg, --theme-fg, --theme-border, --theme-accent
+ */
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 4px;
+  background: var(--theme-bg);
+  color: var(--theme-fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-x: hidden;
+  word-wrap: break-word;
+}
+
+a { color: var(--theme-accent); }
+
+pre {
+  background: rgba(0,0,0,0.3);
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  font-family: "Fira Code", "Consolas", "Monaco", monospace;
+  font-size: 13px;
+}
+
+code {
+  background: rgba(0,0,0,0.2);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: "Fira Code", "Consolas", "Monaco", monospace;
+}
+
+pre code {
+  background: transparent;
+  padding: 0;
+}
+
+blockquote {
+  border-left: 4px solid var(--theme-accent);
+  margin: 12px 0;
+  padding: 8px 16px;
+  background: rgba(0,0,0,0.15);
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 12px 0;
+  border: 1px solid var(--theme-border);
+}
+
+th, td {
+  border: 1px solid var(--theme-border);
+  padding: 8px;
+  text-align: left;
+}
+
+th { background: rgba(0,0,0,0.2); }
+tr:last-child td { border-bottom: 1px solid var(--theme-border); }
+
+hr {
+  border: none;
+  border-top: 1px solid var(--theme-border);
+  margin: 16px 0;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  margin-top: 16px;
+  margin-bottom: 8px;
+  color: var(--theme-fg);
+}
+
+h1:first-child, h2:first-child, h3:first-child, 
+h4:first-child, h5:first-child, h6:first-child {
+  margin-top: 0;
+}
+
+ul, ol { padding-left: 24px; margin: 8px 0; }
+li { margin: 2px 0; }

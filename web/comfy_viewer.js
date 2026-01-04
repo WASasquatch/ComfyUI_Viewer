@@ -1,11 +1,27 @@
 import { app } from "../../scripts/app.js";
+import { 
+  loadAllViews, 
+  initializeViewScripts, 
+  detectContentType, 
+  getViewDisplayName,
+  onViewsRefresh,
+  handleViewMessage,
+  getViewState,
+  injectViewState,
+  getViewScriptData,
+  isMultiviewContent,
+  parseMultiviewContent,
+  getMultiviewContent
+} from "./views/view_loader.js";
+import { loadPrismScripts } from "./views/code_scripts.js";
+import { computeThemeTokens } from "./utils/theme.js";
+import { createControlsBar, CONTROLS_HEIGHT, updateViewSelector } from "./controls/controls_bar.js";
+import { buildIframeContent, LIST_SEPARATOR } from "./iframe/iframe_builder.js";
 
 const EXT_NAME = "WAS.ContentViewer";
 const NODE_NAME = "WASComfyViewer";
 
 const DEFAULT_NODE_SIZE = [600, 500];
-const CONTROLS_HEIGHT = 32;
-const INPUT_SLOT_HEIGHT = 26;
 
 const STATE = {
   container: null,
@@ -13,81 +29,39 @@ const STATE = {
   cleanupIntervalId: null,
   cleanupListenersAttached: false,
   lastScale: 1,
-  prismScripts: null,
-  mermaidScript: null,
-  katexCore: null,
-  katexAutoRender: null,
-  katexCss: null,
+  viewsInitialized: false,
+  updateContainerBounds: null,
+  // Iframe loading queue to prevent browser overload
+  iframeLoadQueue: [],
+  iframeLoading: false,
+  // Hanger check interval
+  hangerCheckIntervalId: null,
 };
 
-const PRISM_FILES = [
-  "prism.min.txt",
-  "prism-python.min.txt",
-  "prism-javascript.min.txt",
-  "prism-css.min.txt",
-  "prism-markup.min.txt",
-  "prism-json.min.txt",
-  "prism-bash.min.txt",
-];
-
-const MERMAID_FILE = "mermaid.min.txt";
-const KATEX_FILES = ["katex.min.txt", "katex-auto-render.min.txt"];
-const KATEX_CSS_FILE = "katex-with-fonts.min.css.txt";
-
-async function loadPrismScripts() {
-  if (STATE.prismScripts) return STATE.prismScripts;
-  
-  try {
-    const basePath = import.meta.url.substring(0, import.meta.url.lastIndexOf("/"));
-    const scripts = await Promise.all(
-      PRISM_FILES.map(async (file) => {
-        const res = await fetch(`${basePath}/${file}`);
-        return res.ok ? res.text() : "";
-      })
-    );
-    STATE.prismScripts = scripts.join("\n");
-    return STATE.prismScripts;
-  } catch (e) {
-    console.error("[WAS Viewer] Failed to load Prism scripts:", e);
-    return "";
-  }
+function getBasePath() {
+  return import.meta.url.substring(0, import.meta.url.lastIndexOf("/"));
 }
 
-loadPrismScripts();
-
-async function loadMermaidScript() {
-  if (STATE.mermaidScript) return STATE.mermaidScript;
+async function initializeViews() {
+  if (STATE.viewsInitialized) return;
   
-  try {
-    const basePath = import.meta.url.substring(0, import.meta.url.lastIndexOf("/"));
-    const res = await fetch(`${basePath}/${MERMAID_FILE}`);
-    STATE.mermaidScript = res.ok ? await res.text() : "";
-    return STATE.mermaidScript;
-  } catch (e) {
-    console.error("[WAS Viewer] Failed to load Mermaid script:", e);
-    return "";
-  }
+  const basePath = getBasePath();
+  
+  await loadAllViews();
+  
+  await Promise.all([
+    initializeViewScripts(basePath),
+    loadPrismScripts(basePath),
+  ]);
+  
+  STATE.viewsInitialized = true;
 }
 
-async function loadKatexScripts() {
-  if (STATE.katexCore && STATE.katexAutoRender && STATE.katexCss) return true;
-  
-  try {
-    const basePath = import.meta.url.substring(0, import.meta.url.lastIndexOf("/"));
-    const [katexCore, autoRender, katexCss] = await Promise.all([
-      fetch(`${basePath}/${KATEX_FILES[0]}`).then(r => r.ok ? r.text() : ""),
-      fetch(`${basePath}/${KATEX_FILES[1]}`).then(r => r.ok ? r.text() : ""),
-      fetch(`${basePath}/${KATEX_CSS_FILE}`).then(r => r.ok ? r.text() : "")
-    ]);
-    STATE.katexCore = katexCore;
-    STATE.katexAutoRender = autoRender;
-    STATE.katexCss = katexCss;
-    return true;
-  } catch (e) {
-    console.error("[WAS Viewer] Failed to load KaTeX scripts:", e);
-    return false;
-  }
-}
+initializeViews();
+
+onViewsRefresh(() => {
+  refreshAllViewers();
+});
 
 function refreshAllViewers() {
   for (const [nodeId, elements] of STATE.nodeIdToElements.entries()) {
@@ -103,959 +77,6 @@ function refreshAllViewers() {
   }
 }
 
-loadMermaidScript().then(() => {
-  if (STATE.mermaidScript) refreshAllViewers();
-});
-loadKatexScripts().then(() => {
-  if (STATE.katexCore && STATE.katexCss) refreshAllViewers();
-});
-
-function simpleHash(str) {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
-  return Math.abs(hash).toString(36);
-}
-
-function readCssVar(style, name) {
-  const v = style.getPropertyValue(name);
-  return v ? String(v).trim() : "";
-}
-
-function computeThemeTokens() {
-  const rootStyle = getComputedStyle(document.documentElement);
-  const bodyStyle = getComputedStyle(document.body);
-
-  const bg =
-    readCssVar(rootStyle, "--comfy-menu-bg") ||
-    readCssVar(rootStyle, "--background-color") ||
-    readCssVar(rootStyle, "--bg-color") ||
-    bodyStyle.backgroundColor ||
-    "#1a1a1a";
-  const fg =
-    readCssVar(rootStyle, "--input-text") ||
-    readCssVar(rootStyle, "--text-color") ||
-    readCssVar(rootStyle, "--fg-color") ||
-    bodyStyle.color ||
-    "#e0e0e0";
-  const border =
-    readCssVar(rootStyle, "--border-color") ||
-    readCssVar(rootStyle, "--comfy-border-color") ||
-    "#444";
-  const accent =
-    readCssVar(rootStyle, "--primary-color") ||
-    readCssVar(rootStyle, "--accent-color") ||
-    readCssVar(rootStyle, "--comfy-accent") ||
-    "#4a9eff";
-
-  return { bg, fg, border, accent };
-}
-
-function detectContentType(content) {
-  if (!content || typeof content !== "string") return "text";
-  const trimmed = content.trim();
-
-  if (trimmed.startsWith("<svg") || 
-      (trimmed.startsWith("<?xml") && trimmed.includes("<svg")) ||
-      (trimmed.startsWith("<") && trimmed.includes("xmlns") && trimmed.includes("<svg"))) {
-    return "svg";
-  }
-
-  if (trimmed.startsWith("<!DOCTYPE") || trimmed.startsWith("<html") || 
-      (trimmed.startsWith("<") && (trimmed.includes("<head") || trimmed.includes("<body")))) {
-    return "html";
-  }
-
-  const scores = { html: 0, markdown: 0, python: 0, javascript: 0, css: 0, json: 0, yaml: 0, csv: 0, ansi: 0 };
-  
-  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-    try {
-      JSON.parse(trimmed);
-      return "json";
-    } catch {}
-  }
-  
-  if (/\x1b\[[\d;]*m/.test(trimmed) || /\033\[[\d;]*m/.test(trimmed)) {
-    return "ansi";
-  }
-  
-  const lines = trimmed.split("\n");
-  const csvLines = lines.filter(l => l.includes(",") && !l.includes("{") && !l.includes("<"));
-  if (csvLines.length >= 2) {
-    const firstLineCommas = (lines[0].match(/,/g) || []).length;
-    if (firstLineCommas >= 1) {
-      const consistentCommas = csvLines.filter(l => (l.match(/,/g) || []).length === firstLineCommas).length;
-      if (consistentCommas >= csvLines.length * 0.8) {
-        scores.csv += 5;
-      }
-    }
-  }
-  
-  const yamlPatterns = [
-    [/^[\w-]+:\s*.+$/m, 2],
-    [/^[\w-]+:\s*$/m, 2],
-    [/^\s+-\s+.+$/m, 1],
-    [/^---\s*$/m, 3],
-  ];
-  for (const [pattern, weight] of yamlPatterns) {
-    if (pattern.test(trimmed)) scores.yaml += weight;
-  }
-  if (trimmed.includes(": ") && !trimmed.includes("{") && !trimmed.includes("<")) {
-    scores.yaml += 1;
-  }
-
-  const htmlTags = ["<div", "<span", "<p>", "<h1", "<h2", "<h3", "<table", "<ul", "<ol", 
-                    "<img", "<a ", "<br", "<hr", "<em>", "<strong>", "<b>", "<i>", "<code>", "<pre>"];
-  for (const tag of htmlTags) {
-    if (trimmed.includes(tag)) scores.html += 2;
-  }
-  if (trimmed.startsWith("<") && trimmed.endsWith(">")) scores.html += 1;
-
-  const mdPatterns = [
-    [/^#{1,6}\s+.+/m, 3],
-    [/^\s*[-*+]\s+.+/m, 1],
-    [/^\s*\d+\.\s+.+/m, 1],
-    [/\[[^\]]+\]\([^)]+\)/, 2],
-    [/^\s*```/m, 3],
-    [/^\s*>/m, 1],
-    [/\*\*[^*]+\*\*/, 1],
-    [/~~[^~]+~~/, 1],
-    [/^\s*\|.+\|.+\|/m, 2],
-    [/!\[[^\]]*\]\([^)]+\)/, 2],
-  ];
-  for (const [pattern, weight] of mdPatterns) {
-    if (pattern.test(trimmed)) scores.markdown += weight;
-  }
-
-  const pyPatterns = [
-    [/^import\s+\w+/m, 3],
-    [/^from\s+\w+\s+import/m, 3],
-    [/^def\s+\w+\s*\(/m, 3],
-    [/^class\s+\w+/m, 3],
-    [/self\.\w+/, 2],
-    [/__init__/, 2],
-    [/__name__/, 2],
-    [/:\s*$/m, 1],
-    [/^\s+return\s+/m, 1],
-    [/^\s+if\s+.+:/m, 1],
-    [/^\s+for\s+.+:/m, 1],
-    [/^\s+elif\s+/m, 2],
-    [/True|False|None/, 1],
-  ];
-  for (const [pattern, weight] of pyPatterns) {
-    if (pattern.test(trimmed)) scores.python += weight;
-  }
-
-  const jsPatterns = [
-    [/^function\s+\w+\s*\(/m, 3],
-    [/^const\s+\w+\s*=/m, 3],
-    [/^let\s+\w+\s*=/m, 3],
-    [/^var\s+\w+\s*=/m, 2],
-    [/=>\s*\{/, 2],
-    [/^import\s+\{/m, 3],
-    [/^export\s+(default\s+)?/m, 3],
-    [/document\.\w+/, 2],
-    [/console\.\w+/, 2],
-    [/\.addEventListener\(/, 2],
-    [/===|!==/, 1],
-    [/\?\.\w+/, 2],
-  ];
-  for (const [pattern, weight] of jsPatterns) {
-    if (pattern.test(trimmed)) scores.javascript += weight;
-  }
-
-  const cssPatterns = [
-    [/[.#][\w-]+\s*\{/, 2],
-    [/:\s*[\w-]+\s*;/, 2],
-    [/@media\s/, 3],
-    [/@import\s/, 2],
-    [/@keyframes\s/, 3],
-    [/^\s*[\w-]+:\s*[^;]+;/m, 1],
-  ];
-  for (const [pattern, weight] of cssPatterns) {
-    if (pattern.test(trimmed)) scores.css += weight;
-  }
-
-  let maxType = "text";
-  let maxScore = 0;
-  for (const [type, score] of Object.entries(scores)) {
-    if (score > maxScore) {
-      maxScore = score;
-      maxType = type;
-    }
-  }
-
-  return maxScore >= 2 ? maxType : "text";
-}
-
-function escapeHtml(text) {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
-}
-
-function parseNestedList(match, listTag, itemTag) {
-  const regex = new RegExp(`<${itemTag}[^>]*data-level="(\\d+)"[^>]*(?:class="([^"]*)")?[^>]*>(.*?)<\\/${itemTag}>`, 'g');
-  const items = [];
-  let m;
-  while ((m = regex.exec(match)) !== null) {
-    items.push({ level: parseInt(m[1]), className: m[2] || '', content: m[3] });
-  }
-  
-  if (items.length === 0) return match;
-  
-  let result = '';
-  let stack = [];
-  
-  for (const item of items) {
-    while (stack.length > 0 && stack[stack.length - 1] > item.level) {
-      result += `</li></${listTag}>`;
-      stack.pop();
-    }
-    
-    if (stack.length === 0 || stack[stack.length - 1] < item.level) {
-      result += `<${listTag}>`;
-      stack.push(item.level);
-    } else if (stack[stack.length - 1] === item.level && result.length > 0) {
-      result += '</li>';
-    }
-    
-    const classAttr = item.className ? ` class="${item.className}"` : '';
-    result += `<li${classAttr}>${item.content}`;
-  }
-  
-  while (stack.length > 0) {
-    result += `</li></${listTag}>`;
-    stack.pop();
-  }
-  
-  return result;
-}
-
-function parseMarkdown(md) {
-  let html = md;
-
-  // Normalize mixed LaTeX delimiters: $$\(...\)$$ -> $$...$$ and $$\[...\]$$ -> $$...$$
-  html = html.replace(/\$\$\s*\\\(([^]*?)\\\)\s*\$\$/g, '$$$$$1$$$$');
-  html = html.replace(/\$\$\s*\\\[([^]*?)\\\]\s*\$\$/g, '$$$$$1$$$$');
-  
-  // Convert inline $$...$$ to $...$ when surrounded by text on same line (not at line start/end)
-  html = html.replace(/([^\n$])\$\$([^$\n]+)\$\$([^\n$])/g, '$1$$$2$$$3');
-
-  html = html.replace(/^```(?:mermaid|flow|flex)(?:\[([^\]]*)\])?\n([\s\S]*?)```$/gm, (_, options, code) => {
-    const centered = options && options.toLowerCase().includes('center');
-    const style = centered ? 'text-align:center;' : 'text-align:left;';
-    return `<div class="mermaid" style="${style}">${code.trim()}</div>`;
-  });
-
-  html = html.replace(/^```(\w*)\n([\s\S]*?)```$/gm, (_, lang, code) => {
-    return `<pre><code class="language-${lang || "text"}">${escapeHtml(code.trim())}</code></pre>`;
-  });
-
-  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-
-  html = html.replace(/^(.+)\n=+\s*$/gm, "<h1>$1</h1>");
-  html = html.replace(/^(.+)\n-+\s*$/gm, "<h2>$1</h2>");
-
-  html = html.replace(/^######\s*(.+)$/gm, "<h6>$1</h6>");
-  html = html.replace(/^#####\s*(.+)$/gm, "<h5>$1</h5>");
-  html = html.replace(/^####\s*(.+)$/gm, "<h4>$1</h4>");
-  html = html.replace(/^###\s*(.+)$/gm, "<h3>$1</h3>");
-  html = html.replace(/^##\s*(.+)$/gm, "<h2>$1</h2>");
-  html = html.replace(/^#\s*(.+)$/gm, "<h1>$1</h1>");
-
-  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;">');
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
-
-  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/__(.+?)__/g, "<strong>$1</strong>");
-  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  html = html.replace(/(?<![a-zA-Z0-9\/_])_([^_\s][^_]*)_(?![a-zA-Z0-9\/_])/g, "<em>$1</em>");
-  html = html.replace(/~~(.+?)~~/g, "<del>$1</del>");
-
-  html = html.replace(/^>\s+(.*)$/gm, "<blockquote>$1</blockquote>");
-
-  html = html.replace(/^(\s*)- \[x\]\s+(.*)$/gim, (_, indent, text) => {
-    const level = Math.floor(indent.length / 2);
-    return `<uli data-level="${level}" class="task-item checked"><input type="checkbox" checked disabled> ${text}</uli>`;
-  });
-  html = html.replace(/^(\s*)- \[ \]\s+(.*)$/gm, (_, indent, text) => {
-    const level = Math.floor(indent.length / 2);
-    return `<uli data-level="${level}" class="task-item"><input type="checkbox" disabled> ${text}</uli>`;
-  });
-
-  html = html.replace(/^(\s*)\d+\.\s+(.*)$/gm, (_, indent, text) => {
-    const level = Math.floor(indent.length / 2);
-    return `<oli data-level="${level}">${text}</oli>`;
-  });
-
-  html = html.replace(/^(\s*)[-*+]\s+(.*)$/gm, (_, indent, text) => {
-    const level = Math.floor(indent.length / 2);
-    return `<uli data-level="${level}">${text}</uli>`;
-  });
-
-  html = html.replace(/(<oli[^>]*>.*?<\/oli>\s*)+/g, (match) => {
-    return parseNestedList(match, 'ol', 'oli');
-  });
-
-  html = html.replace(/(<uli[^>]*>.*?<\/uli>\s*)+/g, (match) => {
-    return parseNestedList(match, 'ul', 'uli');
-  });
-
-  html = html.replace(/^---$/gm, "<hr>");
-  html = html.replace(/^\*\*\*$/gm, "<hr>");
-
-  html = html.replace(/^(\|.+\|)\n(\|[-:\s|]+\|)\n((?:\|.+\|\n?)+)/gm, (match, headerRow, separatorRow, bodyRows) => {
-    const parseRow = (row, cellTag) => {
-      const cells = row.split("|").slice(1, -1);
-      return `<tr>${cells.map(c => `<${cellTag}>${c.trim()}</${cellTag}>`).join("")}</tr>`;
-    };
-    const alignments = separatorRow.split("|").slice(1, -1).map(cell => {
-      const trimmed = cell.trim();
-      if (trimmed.startsWith(":") && trimmed.endsWith(":")) return "center";
-      if (trimmed.endsWith(":")) return "right";
-      return "left";
-    });
-    const headerCells = headerRow.split("|").slice(1, -1);
-    const theadRow = `<tr>${headerCells.map((c, i) => `<th style="text-align:${alignments[i] || "left"}">${c.trim()}</th>`).join("")}</tr>`;
-    const bodyRowsArray = bodyRows.trim().split("\n");
-    const tbodyRows = bodyRowsArray.map(row => {
-      const cells = row.split("|").slice(1, -1);
-      return `<tr>${cells.map((c, i) => `<td style="text-align:${alignments[i] || "left"}">${c.trim()}</td>`).join("")}</tr>`;
-    }).join("");
-    return `<table><thead>${theadRow}</thead><tbody>${tbodyRows}</tbody></table>`;
-  });
-
-  html = html.replace(/\n\n/g, "</p><p>");
-  html = "<p>" + html + "</p>";
-  html = html.replace(/<p>\s*<(h[1-6]|ul|ol|pre|blockquote|hr|table)/g, "<$1");
-  html = html.replace(/<\/(h[1-6]|ul|ol|pre|blockquote|table)>\s*<\/p>/g, "</$1>");
-  html = html.replace(/<p>\s*<\/p>/g, "");
-
-  return html;
-}
-
-function renderCodeContent(content, language) {
-  const langMap = {
-    python: "python",
-    javascript: "javascript",
-    css: "css",
-    yaml: "yaml",
-    text: "plaintext",
-  };
-  const lang = langMap[language] || "plaintext";
-  return `<pre><code class="language-${lang}">${escapeHtml(content)}</code></pre>`;
-}
-
-function renderJsonTree(data, depth = 0) {
-  const indent = "  ".repeat(depth);
-  if (data === null) return `<span class="json-null">null</span>`;
-  if (typeof data === "boolean") return `<span class="json-boolean">${data}</span>`;
-  if (typeof data === "number") return `<span class="json-number">${data}</span>`;
-  if (typeof data === "string") return `<span class="json-string">"${escapeHtml(data)}"</span>`;
-  
-  if (Array.isArray(data)) {
-    if (data.length === 0) return `<span class="json-bracket">[]</span>`;
-    const id = `json-${Math.random().toString(36).slice(2, 9)}`;
-    const items = data.map((item, i) => {
-      const comma = i < data.length - 1 ? "," : "";
-      return `${indent}  ${renderJsonTree(item, depth + 1)}${comma}`;
-    }).join("\n");
-    return `<span class="json-toggle" onclick="toggleJson('${id}')">[<span class="json-count">${data.length} items</span>]</span><div id="${id}" class="json-collapsible">\n${items}\n${indent}<span class="json-bracket">]</span></div>`;
-  }
-  
-  if (typeof data === "object") {
-    const keys = Object.keys(data);
-    if (keys.length === 0) return `<span class="json-bracket">{}</span>`;
-    const id = `json-${Math.random().toString(36).slice(2, 9)}`;
-    const items = keys.map((key, i) => {
-      const comma = i < keys.length - 1 ? "," : "";
-      return `${indent}  <span class="json-key">"${escapeHtml(key)}"</span>: ${renderJsonTree(data[key], depth + 1)}${comma}`;
-    }).join("\n");
-    return `<span class="json-toggle" onclick="toggleJson('${id}')">{<span class="json-count">${keys.length} keys</span>}</span><div id="${id}" class="json-collapsible">\n${items}\n${indent}<span class="json-bracket">}</span></div>`;
-  }
-  
-  return escapeHtml(String(data));
-}
-
-function renderCsvTable(content) {
-  const lines = content.trim().split("\n");
-  if (lines.length === 0) return `<pre>${escapeHtml(content)}</pre>`;
-  
-  const parseRow = (line) => {
-    const result = [];
-    let current = "";
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i];
-      if (char === '"') {
-        inQuotes = !inQuotes;
-      } else if (char === "," && !inQuotes) {
-        result.push(current.trim());
-        current = "";
-      } else {
-        current += char;
-      }
-    }
-    result.push(current.trim());
-    return result;
-  };
-  
-  const headers = parseRow(lines[0]);
-  const rows = lines.slice(1).map(parseRow);
-  
-  const thead = `<thead><tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>`;
-  const tbody = `<tbody>${rows.map(row => 
-    `<tr>${row.map(cell => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`
-  ).join("")}</tbody>`;
-  
-  return `<div class="csv-container"><table class="csv-table">${thead}${tbody}</table></div>`;
-}
-
-function renderAnsiContent(content) {
-  const ansiColors = {
-    "30": "#000", "31": "#e74c3c", "32": "#2ecc71", "33": "#f39c12",
-    "34": "#3498db", "35": "#9b59b6", "36": "#1abc9c", "37": "#ecf0f1",
-    "90": "#7f8c8d", "91": "#ff6b6b", "92": "#69db7c", "93": "#ffd43b",
-    "94": "#74c0fc", "95": "#da77f2", "96": "#63e6be", "97": "#fff",
-  };
-  const bgColors = {
-    "40": "#000", "41": "#e74c3c", "42": "#2ecc71", "43": "#f39c12",
-    "44": "#3498db", "45": "#9b59b6", "46": "#1abc9c", "47": "#ecf0f1",
-  };
-  
-  let html = escapeHtml(content);
-  html = html.replace(/(?:\x1b|\033)\[([\d;]*)m/g, (match, codes) => {
-    if (!codes || codes === "0") return "</span>";
-    const parts = codes.split(";");
-    let style = "";
-    for (const code of parts) {
-      if (ansiColors[code]) style += `color:${ansiColors[code]};`;
-      if (bgColors[code]) style += `background:${bgColors[code]};`;
-      if (code === "1") style += "font-weight:bold;";
-      if (code === "3") style += "font-style:italic;";
-      if (code === "4") style += "text-decoration:underline;";
-    }
-    return style ? `<span style="${style}">` : "";
-  });
-  
-  return `<pre class="ansi-output">${html}</pre>`;
-}
-
-async function createZipBlob(files) {
-  const crc32 = (data) => {
-    let crc = 0xFFFFFFFF;
-    const table = new Uint32Array(256);
-    for (let i = 0; i < 256; i++) {
-      let c = i;
-      for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-      table[i] = c;
-    }
-    for (let i = 0; i < data.length; i++) crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
-    return (crc ^ 0xFFFFFFFF) >>> 0;
-  };
-
-  const encoder = new TextEncoder();
-  const parts = [];
-  const centralDir = [];
-  let offset = 0;
-
-  for (const file of files) {
-    const nameBytes = encoder.encode(file.name);
-    const contentBytes = encoder.encode(file.content);
-    const crc = crc32(contentBytes);
-    const localHeader = new Uint8Array(30 + nameBytes.length);
-    const view = new DataView(localHeader.buffer);
-    
-    view.setUint32(0, 0x04034B50, true);
-    view.setUint16(4, 20, true);
-    view.setUint16(6, 0, true);
-    view.setUint16(8, 0, true);
-    view.setUint16(10, 0, true);
-    view.setUint16(12, 0, true);
-    view.setUint32(14, crc, true);
-    view.setUint32(18, contentBytes.length, true);
-    view.setUint32(22, contentBytes.length, true);
-    view.setUint16(26, nameBytes.length, true);
-    view.setUint16(28, 0, true);
-    localHeader.set(nameBytes, 30);
-
-    const centralEntry = new Uint8Array(46 + nameBytes.length);
-    const cView = new DataView(centralEntry.buffer);
-    cView.setUint32(0, 0x02014B50, true);
-    cView.setUint16(4, 20, true);
-    cView.setUint16(6, 20, true);
-    cView.setUint16(8, 0, true);
-    cView.setUint16(10, 0, true);
-    cView.setUint16(12, 0, true);
-    cView.setUint16(14, 0, true);
-    cView.setUint32(16, crc, true);
-    cView.setUint32(20, contentBytes.length, true);
-    cView.setUint32(24, contentBytes.length, true);
-    cView.setUint16(28, nameBytes.length, true);
-    cView.setUint16(30, 0, true);
-    cView.setUint16(32, 0, true);
-    cView.setUint16(34, 0, true);
-    cView.setUint16(36, 0, true);
-    cView.setUint32(38, 0, true);
-    cView.setUint32(42, offset, true);
-    centralEntry.set(nameBytes, 46);
-
-    parts.push(localHeader, contentBytes);
-    centralDir.push(centralEntry);
-    offset += localHeader.length + contentBytes.length;
-  }
-
-  const centralDirOffset = offset;
-  let centralDirSize = 0;
-  for (const entry of centralDir) {
-    parts.push(entry);
-    centralDirSize += entry.length;
-  }
-
-  const endRecord = new Uint8Array(22);
-  const endView = new DataView(endRecord.buffer);
-  endView.setUint32(0, 0x06054B50, true);
-  endView.setUint16(4, 0, true);
-  endView.setUint16(6, 0, true);
-  endView.setUint16(8, files.length, true);
-  endView.setUint16(10, files.length, true);
-  endView.setUint32(12, centralDirSize, true);
-  endView.setUint32(16, centralDirOffset, true);
-  endView.setUint16(20, 0, true);
-  parts.push(endRecord);
-
-  return new Blob(parts, { type: "application/zip" });
-}
-
-function buildIframeContent(content, contentType, theme, excluded = []) {
-  const baseStyles = `
-    * { box-sizing: border-box; }
-    html, body {
-      margin: 0;
-      padding: 4px;
-      background: ${theme.bg};
-      color: ${theme.fg};
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      font-size: 14px;
-      line-height: 1.6;
-      overflow-x: hidden;
-      word-wrap: break-word;
-    }
-    a { color: ${theme.accent}; }
-    pre {
-      background: rgba(0,0,0,0.3);
-      padding: 12px;
-      border-radius: 6px;
-      overflow-x: hidden;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      overflow-wrap: break-word;
-      font-family: "Fira Code", "Consolas", "Monaco", monospace;
-      font-size: 13px;
-    }
-    code {
-      background: rgba(0,0,0,0.2);
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-family: "Fira Code", "Consolas", "Monaco", monospace;
-    }
-    pre code {
-      background: transparent;
-      padding: 0;
-    }
-    blockquote {
-      border-left: 4px solid ${theme.accent};
-      margin: 12px 0;
-      padding: 8px 16px;
-      background: rgba(0,0,0,0.15);
-    }
-    img { max-width: 100%; height: auto; border-radius: 4px; }
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      margin: 12px 0;
-      border: 1px solid ${theme.border};
-    }
-    th, td {
-      border: 1px solid ${theme.border};
-      padding: 8px;
-      text-align: left;
-    }
-    th { background: rgba(0,0,0,0.2); }
-    tr:last-child td { border-bottom: 1px solid ${theme.border}; }
-    hr {
-      border: none;
-      border-top: 1px solid ${theme.border};
-      margin: 16px 0;
-    }
-    h1, h2, h3, h4, h5, h6 {
-      margin-top: 16px;
-      margin-bottom: 8px;
-      color: ${theme.fg};
-    }
-    h1:first-child, h2:first-child, h3:first-child, h4:first-child, h5:first-child, h6:first-child {
-      margin-top: 0;
-    }
-    ul, ol { padding-left: 24px; margin: 8px 0; }
-    li { margin: 2px 0; }
-    .list-item {
-      background: rgba(0,0,0,0.2);
-      border: 1px solid ${theme.border};
-      border-radius: 6px;
-      padding: 12px;
-      margin-bottom: 8px;
-      position: relative;
-    }
-    .list-item:last-child { margin-bottom: 0; }
-    .list-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 8px;
-    }
-    .list-header-left {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .list-checkbox {
-      width: 16px;
-      height: 16px;
-      cursor: pointer;
-      accent-color: ${theme.accent};
-    }
-    .list-index {
-      display: inline-block;
-      background: ${theme.accent};
-      color: #fff;
-      font-size: 11px;
-      font-weight: bold;
-      padding: 2px 6px;
-      border-radius: 4px;
-    }
-    .list-item.excluded {
-      opacity: 0.5;
-    }
-    .list-item.excluded .list-index {
-      background: #666;
-    }
-    .copy-btn {
-      background: transparent;
-      border: 1px solid ${theme.border};
-      border-radius: 4px;
-      color: ${theme.fg};
-      cursor: pointer;
-      padding: 4px 8px;
-      font-size: 11px;
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      transition: all 0.2s;
-    }
-    .copy-btn:hover {
-      background: ${theme.accent};
-      color: #fff;
-      border-color: ${theme.accent};
-    }
-    .copy-btn.copied {
-      background: #22c55e;
-      border-color: #22c55e;
-      color: #fff;
-    }
-    .list-content {
-      white-space: pre-wrap;
-      word-wrap: break-word;
-    }
-    .json-tree pre {
-      margin: 0;
-      white-space: pre-wrap;
-      font-size: 13px;
-    }
-    .json-key { color: #9cdcfe; }
-    .json-string { color: #ce9178; }
-    .json-number { color: #b5cea8; }
-    .json-boolean { color: #569cd6; }
-    .json-null { color: #569cd6; }
-    .json-bracket { color: ${theme.fg}; }
-    .json-toggle {
-      cursor: pointer;
-      user-select: none;
-    }
-    .json-toggle:hover { opacity: 0.8; }
-    .json-count {
-      color: #6a9955;
-      font-size: 11px;
-      margin-left: 4px;
-    }
-    .json-collapsible {
-      margin-left: 16px;
-    }
-    .json-collapsible.collapsed {
-      display: none;
-    }
-    .csv-container {
-      overflow-x: auto;
-    }
-    .csv-table {
-      border-collapse: collapse;
-      width: 100%;
-      font-size: 13px;
-    }
-    .csv-table th, .csv-table td {
-      border: 1px solid ${theme.border};
-      padding: 8px 12px;
-      text-align: left;
-    }
-    .csv-table th {
-      background: rgba(0,0,0,0.3);
-      font-weight: bold;
-    }
-    .csv-table tr:nth-child(even) {
-      background: rgba(0,0,0,0.1);
-    }
-    .ansi-output {
-      background: #1e1e1e;
-      padding: 12px;
-      border-radius: 6px;
-      font-family: "Fira Code", Consolas, Monaco, monospace;
-      font-size: 13px;
-      line-height: 1.4;
-    }
-    .mermaid {
-      background: transparent;
-      text-align: center;
-      padding: 16px;
-    }
-    .math-block {
-      text-align: center;
-      margin: 16px 0;
-      overflow-x: auto;
-    }
-    .task-item {
-      list-style: none;
-      margin-left: -20px;
-    }
-    .task-item input[type="checkbox"] {
-      margin-right: 8px;
-      accent-color: ${theme.accent};
-    }
-    .task-item.checked {
-      color: ${theme.fg};
-    }
-  `;
-
-  const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
-  const isListContent = content.includes(LIST_SEPARATOR);
-  
-  let bodyContent = "";
-  
-  if (isListContent) {
-    const items = content.split(LIST_SEPARATOR);
-    const itemsData = JSON.stringify(items);
-    bodyContent = items.map((item, idx) => {
-      const itemType = detectContentType(item);
-      let itemHtml = "";
-      if (itemType === "html") {
-        itemHtml = item;
-      } else if (itemType === "markdown") {
-        itemHtml = parseMarkdown(item);
-      } else {
-        itemHtml = `<div class="list-content">${escapeHtml(item)}</div>`;
-      }
-      const isExcluded = excluded.includes(idx);
-      return `<div class="list-item${isExcluded ? ' excluded' : ''}" data-idx="${idx}">
-        <div class="list-header">
-          <div class="list-header-left">
-            <input type="checkbox" class="list-checkbox" data-idx="${idx}" ${isExcluded ? '' : 'checked'} onchange="toggleItem(${idx}, this.checked)">
-            <span class="list-index">${idx + 1} / ${items.length}</span>
-          </div>
-          <button class="copy-btn" data-index="${idx}" onclick="copyItem(${idx})">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
-            Copy
-          </button>
-        </div>
-        ${itemHtml}
-      </div>`;
-    }).join("");
-    bodyContent += `<script>
-      const items = ${itemsData};
-      function copyItem(idx) {
-        const text = items[idx];
-        navigator.clipboard.writeText(text).then(() => {
-          const btn = document.querySelector('[data-index="' + idx + '"]');
-          btn.classList.add('copied');
-          btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg> Copied!';
-          setTimeout(() => {
-            btn.classList.remove('copied');
-            btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg> Copy';
-          }, 1500);
-        });
-      }
-      function toggleItem(idx, checked) {
-        const item = document.querySelector('.list-item[data-idx="' + idx + '"]');
-        if (item) item.classList.toggle('excluded', !checked);
-        window.parent.postMessage({ type: 'was-viewer-toggle', idx: idx, checked: checked }, '*');
-      }
-    <\/script>`;
-  } else switch (contentType) {
-    case "html":
-      if (content.includes("<html") || content.includes("<!DOCTYPE")) {
-        const hasCustomStyles = content.includes("<style") || 
-                                content.includes("background") || 
-                                content.includes("color:");
-        if (hasCustomStyles) {
-          return content;
-        }
-        return content.replace("</head>", `<style>${baseStyles}</style></head>`);
-      }
-      bodyContent = content;
-      break;
-    case "markdown":
-      bodyContent = parseMarkdown(content);
-      break;
-    case "svg":
-      bodyContent = `<div style="display:flex;justify-content:center;align-items:center;min-height:100%;padding:16px;">${content}</div>`;
-      break;
-    case "json":
-      try {
-        const parsed = JSON.parse(content);
-        bodyContent = `<div class="json-tree"><pre>${renderJsonTree(parsed)}</pre></div>`;
-      } catch {
-        bodyContent = renderCodeContent(content, "javascript");
-      }
-      break;
-    case "csv":
-      bodyContent = renderCsvTable(content);
-      break;
-    case "yaml":
-      bodyContent = renderCodeContent(content, "yaml");
-      break;
-    case "ansi":
-      bodyContent = renderAnsiContent(content);
-      break;
-    case "python":
-    case "javascript":
-    case "css":
-    case "text":
-      bodyContent = renderCodeContent(content, contentType);
-      break;
-    default:
-      bodyContent = `<pre>${escapeHtml(content)}</pre>`;
-  }
-
-  const prismTheme = `
-    code[class*="language-"], pre[class*="language-"] {
-      color: ${theme.fg};
-      text-shadow: none;
-      font-family: "Fira Code", Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;
-      font-size: 13px;
-      text-align: left;
-      white-space: pre-wrap;
-      word-spacing: normal;
-      word-break: normal;
-      word-wrap: break-word;
-      line-height: 1.5;
-      tab-size: 4;
-      hyphens: none;
-    }
-    pre[class*="language-"] {
-      padding: 12px;
-      margin: 0;
-      overflow: auto;
-      border-radius: 6px;
-      background: rgba(0,0,0,0.3);
-    }
-    :not(pre) > code[class*="language-"] {
-      padding: 2px 6px;
-      border-radius: 4px;
-      background: rgba(0,0,0,0.2);
-    }
-    .token.comment, .token.prolog, .token.doctype, .token.cdata { color: #6a9955; }
-    .token.punctuation { color: ${theme.fg}; }
-    .token.namespace { opacity: .7; }
-    .token.property, .token.tag, .token.boolean, .token.number, .token.constant, .token.symbol, .token.deleted { color: #b5cea8; }
-    .token.selector, .token.attr-name, .token.string, .token.char, .token.builtin, .token.inserted { color: #ce9178; }
-    .token.operator, .token.entity, .token.url, .language-css .token.string, .style .token.string { color: #d4d4d4; }
-    .token.atrule, .token.attr-value, .token.keyword { color: #569cd6; }
-    .token.function, .token.class-name { color: #dcdcaa; }
-    .token.regex, .token.important, .token.variable { color: #d16969; }
-    .token.important, .token.bold { font-weight: bold; }
-    .token.italic { font-style: italic; }
-  `;
-
-  const needsPrism = ["python", "javascript", "css", "yaml"].includes(contentType) || 
-                     content.includes("```") || content.includes("<code");
-
-  const prismScripts = needsPrism && STATE.prismScripts ? `
-    <script>${STATE.prismScripts}<\/script>
-    <script>document.addEventListener('DOMContentLoaded', () => Prism.highlightAll());<\/script>
-  ` : "";
-
-  const jsonScript = contentType === "json" ? `
-    <script>
-      function toggleJson(id) {
-        const el = document.getElementById(id);
-        if (el) el.classList.toggle('collapsed');
-      }
-    <\/script>
-  ` : "";
-
-  const hasMermaid = /```(?:mermaid|flow|flex)/.test(content) || content.includes("<div class=\"mermaid\">");
-  const mermaidScript = hasMermaid && STATE.mermaidScript ? `
-    <script>${STATE.mermaidScript}<\/script>
-    <script>
-      document.addEventListener('DOMContentLoaded', () => {
-        mermaid.initialize({ startOnLoad: true, theme: 'dark' });
-      });
-    <\/script>
-  ` : "";
-
-  const hasLatex = content.includes("$$") || content.includes("\\(") || content.includes("\\[") || /\$[^$\n]+\$/.test(content);
-  const katexStyles = hasLatex && STATE.katexCss ? `<style>${STATE.katexCss}</style>` : "";
-  const katexScript = hasLatex && STATE.katexCore && STATE.katexAutoRender ? `
-    <script>${STATE.katexCore}<\/script>
-    <script>${STATE.katexAutoRender}<\/script>
-    <script>
-      document.addEventListener('DOMContentLoaded', () => {
-        if (typeof renderMathInElement === 'function') {
-          renderMathInElement(document.body, {
-            delimiters: [
-              {left: '$$', right: '$$', display: true},
-              {left: '$', right: '$', display: false},
-              {left: '\\\\(', right: '\\\\)', display: false},
-              {left: '\\\\[', right: '\\\\]', display: true}
-            ],
-            ignoredTags: ['script', 'noscript', 'style', 'textarea', 'option'],
-            throwOnError: false
-          });
-        }
-      });
-    <\/script>
-  ` : "";
-
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>${baseStyles}${needsPrism ? prismTheme : ""}</style>
-  ${katexStyles}
-  ${prismScripts}
-  ${jsonScript}
-  ${mermaidScript}
-  ${katexScript}
-</head>
-<body>${bodyContent}</body>
-</html>`;
-}
-
 function getActiveGraphNodes() {
   const g = app?.graph || app?.canvas?.graph;
   const nodes = g?._nodes || g?.nodes;
@@ -1064,16 +85,20 @@ function getActiveGraphNodes() {
 
 function isViewerNode(node) {
   try {
-    return (
-      node?.comfyClass === NODE_NAME ||
-      node?.type === NODE_NAME ||
-      node?.constructor?.comfyClass === NODE_NAME ||
-      node?.constructor?.type === NODE_NAME
-    );
+    const nodeType = node?.comfyClass || node?.type || node?.constructor?.comfyClass || node?.constructor?.type;
+    return nodeType === NODE_NAME;
   } catch (e) {
     console.error("[WAS Viewer] isViewerNode error:", e);
     return false;
   }
+}
+
+/**
+ * Check if node is muted or bypassed
+ * LiteGraph modes: 0=ALWAYS, 1=ON_EVENT, 2=NEVER (muted), 3=ON_TRIGGER, 4=bypassed
+ */
+function isNodeDisabled(node) {
+  return node?.mode === 2 || node?.mode === 4;
 }
 
 function removeElementsByKey(key) {
@@ -1128,6 +153,50 @@ function ensureCleanupRunning() {
   }
 }
 
+function checkForHangers() {
+  const canvas = app.canvas;
+  const canvasEl = canvas?.canvas;
+  if (!canvasEl) return;
+
+  const canvasRect = canvasEl.getBoundingClientRect();
+  const ds = canvas.ds;
+  const scale = ds?.scale ?? 1;
+  const offset = ds?.offset ?? [0, 0];
+
+  for (const [nodeId, elements] of STATE.nodeIdToElements.entries()) {
+    if (!elements?.wrapper) continue;
+    
+    const node = app?.graph?.getNodeById(parseInt(nodeId));
+    if (!node) {
+      // Node no longer exists, hide wrapper
+      elements.wrapper.style.display = "none";
+      continue;
+    }
+
+    const titleH = node?.title_height ?? 30;
+    const margin = 10;
+    const expectedScreenX = (node.pos[0] + margin + offset[0]) * scale + canvasRect.left;
+    const expectedScreenY = (node.pos[1] + margin + titleH + offset[1]) * scale + canvasRect.top;
+    const scaledW = (node.size[0] - margin * 2) * scale;
+    const scaledH = (node.size[1] - titleH - margin * 2) * scale;
+
+    const isOffScreen = 
+      (expectedScreenX + scaledW < canvasRect.left) ||
+      (expectedScreenX > canvasRect.right) ||
+      (expectedScreenY + scaledH < canvasRect.top) ||
+      (expectedScreenY > canvasRect.bottom);
+
+    if (isOffScreen) {
+      elements.wrapper.style.display = "none";
+    }
+  }
+}
+
+function startHangerCheck() {
+  if (STATE.hangerCheckIntervalId != null) return;
+  STATE.hangerCheckIntervalId = window.setInterval(() => checkForHangers(), 100);
+}
+
 function getContainer() {
   if (STATE.container) return STATE.container;
   
@@ -1153,9 +222,29 @@ function getContainer() {
     pointer-events: none;
     z-index: 100;
     overflow: hidden;
+    clip-path: inset(0);
   `;
   canvasParent.appendChild(el);
   STATE.container = el;
+  
+  function updateContainerBounds() {
+    if (!canvasEl || !el) return;
+    const rect = canvasEl.getBoundingClientRect();
+    const parentRect = canvasParent.getBoundingClientRect();
+    const left = rect.left - parentRect.left;
+    const top = rect.top - parentRect.top;
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+    el.style.width = `${rect.width}px`;
+    el.style.height = `${rect.height}px`;
+  }
+  
+  updateContainerBounds();
+  STATE.updateContainerBounds = updateContainerBounds;
+  
+  const resizeObserver = new ResizeObserver(updateContainerBounds);
+  resizeObserver.observe(canvasEl);
+  
   return el;
 }
 
@@ -1227,383 +316,34 @@ function getNodeContent(node, elements) {
   return "";
 }
 
-function createControlsBar(node, elements) {
-  const theme = computeThemeTokens();
-  
-  const controls = document.createElement("div");
-  controls.style.cssText = `
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 8px;
-    background: ${theme.bg};
-    border-bottom: 1px solid ${theme.border};
-    border-radius: 8px 8px 0 0;
-    pointer-events: auto;
-    box-sizing: border-box;
-    flex-shrink: 0;
-    min-height: ${CONTROLS_HEIGHT}px;
-  `;
-
-  const typeLabel = document.createElement("span");
-  typeLabel.style.cssText = `
-    font-size: 11px;
-    color: ${theme.fg};
-    opacity: 0.7;
-    font-family: sans-serif;
-    margin-right: auto;
-  `;
-  typeLabel.textContent = "Type: detecting...";
-  controls.appendChild(typeLabel);
-
-  const toggleAllBtn = document.createElement("button");
-  toggleAllBtn.textContent = "☑";
-  toggleAllBtn.title = "Toggle All Checkboxes";
-  toggleAllBtn.style.cssText = `
-    padding: 0 6px;
-    font-size: 14px;
-    border: 1px solid ${theme.border};
-    border-radius: 4px;
-    background: ${theme.bg};
-    color: ${theme.fg};
-    cursor: pointer;
-    font-family: sans-serif;
-    display: none;
-  `;
-  toggleAllBtn.onmouseenter = () => { toggleAllBtn.style.background = theme.accent; toggleAllBtn.style.color = "#fff"; };
-  toggleAllBtn.onmouseleave = () => { toggleAllBtn.style.background = theme.bg; toggleAllBtn.style.color = theme.fg; };
-  
-  toggleAllBtn.onclick = () => {
-    const content = getNodeContent(node, elements);
-    const metaWidget = node.widgets?.find(w => w.name === "viewer_meta");
-    if (!metaWidget) return;
-    
-    let meta = { lastInputHash: "", excluded: [] };
-    try {
-      meta = JSON.parse(metaWidget.value || "{}");
-      if (!Array.isArray(meta.excluded)) meta.excluded = [];
-    } catch {}
-    
-    const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
-    const items = content.split(LIST_SEPARATOR);
-    const allChecked = meta.excluded.length === 0;
-    
-    if (allChecked) {
-      meta.excluded = items.map((_, i) => i);
-      toggleAllBtn.textContent = "☐";
-      toggleAllBtn.title = "Check All";
-    } else {
-      meta.excluded = [];
-      toggleAllBtn.textContent = "☑";
-      toggleAllBtn.title = "Uncheck All";
-    }
-    
-    metaWidget.value = JSON.stringify(meta);
-    elements.lastContentHash = "";
-    node.setDirtyCanvas?.(true, true);
-    updateIframeContent(node, elements);
-  };
-  controls.appendChild(toggleAllBtn);
-  elements.toggleAllBtn = toggleAllBtn;
-
-  const editBtn = document.createElement("button");
-  editBtn.textContent = "Edit";
-  editBtn.style.cssText = `
-    padding: 4px 12px;
-    font-size: 11px;
-    border: 1px solid ${theme.border};
-    border-radius: 4px;
-    background: ${theme.bg};
-    color: ${theme.fg};
-    cursor: pointer;
-    font-family: sans-serif;
-  `;
-  editBtn.onmouseenter = () => { editBtn.style.background = theme.accent; editBtn.style.color = "#fff"; };
-  editBtn.onmouseleave = () => { editBtn.style.background = theme.bg; editBtn.style.color = theme.fg; };
-  
-  editBtn.onclick = () => {
-    if (elements.isEditing) {
-      let newContent = "";
-      if (elements.listTextareas && elements.listTextareas.length > 0) {
-        const values = elements.listTextareas.map(ta => ta.value);
-        newContent = values.join("\n---LIST_SEPARATOR---\n");
-        elements.listEditContainer.style.display = "none";
-        elements.listTextareas = [];
-      } else {
-        newContent = elements.textarea.value;
-        elements.textarea.style.display = "none";
-      }
-      setWidgetValue(node, "manual_content", newContent);
-      elements.lastContentHash = "";
-      elements.isEditing = false;
-      elements.iframe.style.display = "block";
-      editBtn.textContent = "Edit";
-      
-      node.setDirtyCanvas?.(true, true);
-      app.graph?.change?.();
-      updateIframeContent(node, elements);
-    } else {
-      elements.isEditing = true;
-      const currentContent = getNodeContent(node, elements);
-      const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
-      
-      if (currentContent.includes(LIST_SEPARATOR)) {
-        const items = currentContent.split(LIST_SEPARATOR);
-        if (!elements.listEditContainer && elements.contentWrapper) {
-          elements.listEditContainer = document.createElement("div");
-          elements.listEditContainer.style.cssText = `
-            position: absolute;
-            inset: 0;
-            overflow-y: auto;
-            padding: 8px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            background: ${theme.bg};
-          `;
-          elements.contentWrapper.appendChild(elements.listEditContainer);
-        }
-        if (!elements.listEditContainer) return;
-        elements.listEditContainer.innerHTML = "";
-        elements.listEditContainer.style.display = "flex";
-        elements.listTextareas = [];
-        
-        items.forEach((item, idx) => {
-          const itemContainer = document.createElement("div");
-          itemContainer.style.cssText = `
-            background: rgba(0,0,0,0.2);
-            border: 1px solid ${theme.border};
-            border-radius: 6px;
-            padding: 8px;
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-          `;
-          const label = document.createElement("span");
-          label.textContent = `${idx + 1} / ${items.length}`;
-          label.style.cssText = `
-            background: ${theme.accent};
-            color: #fff;
-            font-size: 11px;
-            font-weight: bold;
-            padding: 2px 6px;
-            border-radius: 4px;
-            align-self: flex-start;
-          `;
-          const ta = document.createElement("textarea");
-          ta.value = item;
-          ta.style.cssText = `
-            width: 100%;
-            min-height: 80px;
-            resize: vertical;
-            background: rgba(0,0,0,0.3);
-            color: ${theme.fg};
-            border: 1px solid ${theme.border};
-            border-radius: 4px;
-            padding: 8px;
-            font-family: monospace;
-            font-size: 13px;
-          `;
-          itemContainer.appendChild(label);
-          itemContainer.appendChild(ta);
-          elements.listEditContainer.appendChild(itemContainer);
-          elements.listTextareas.push(ta);
-        });
-        elements.iframe.style.display = "none";
-        elements.textarea.style.display = "none";
-      } else {
-        elements.textarea.value = currentContent;
-        elements.textarea.style.display = "block";
-        elements.iframe.style.display = "none";
-        if (elements.listEditContainer) elements.listEditContainer.style.display = "none";
-      }
-      editBtn.textContent = "Save";
-      if (elements.listTextareas?.[0]) {
-        elements.listTextareas[0].focus();
-      } else {
-        elements.textarea.focus();
-      }
-    }
-  };
-  controls.appendChild(editBtn);
-
-  const clearBtn = document.createElement("button");
-  clearBtn.textContent = "Clear";
-  clearBtn.style.cssText = `
-    padding: 4px 12px;
-    font-size: 11px;
-    border: 1px solid ${theme.border};
-    border-radius: 4px;
-    background: ${theme.bg};
-    color: ${theme.fg};
-    cursor: pointer;
-    font-family: sans-serif;
-  `;
-  clearBtn.onmouseenter = () => { clearBtn.style.background = "#c44"; clearBtn.style.color = "#fff"; };
-  clearBtn.onmouseleave = () => { clearBtn.style.background = theme.bg; clearBtn.style.color = theme.fg; };
-  
-  clearBtn.onclick = () => {
-    setWidgetValue(node, "manual_content", "");
-    const contentWidget = node.widgets?.find((w) => w.name === "content");
-    if (contentWidget) contentWidget.value = "";
-    elements.lastContentHash = "";
-    elements.textarea.value = "";
-    if (elements.isEditing) {
-      elements.isEditing = false;
-      elements.textarea.style.display = "none";
-      elements.iframe.style.display = "block";
-      editBtn.textContent = "Edit";
-    }
-    node.setDirtyCanvas?.(true, true);
-    app.graph?.change?.();
-    
-    const theme = computeThemeTokens();
-    const emptyHtml = buildIframeContent("<p style='opacity:0.5;text-align:center;margin-top:40px;'>No content. Click Edit to add content or connect a STRING input.</p>", "html", theme);
-    elements.iframe.srcdoc = emptyHtml;
-    if (elements.typeLabel) elements.typeLabel.textContent = "Type: Text";
-  };
-  controls.appendChild(clearBtn);
-
-  const fullscreenBtn = document.createElement("button");
-  fullscreenBtn.textContent = "⛶";
-  fullscreenBtn.title = "Fullscreen";
-  fullscreenBtn.style.cssText = `
-    padding: 0 4px;
-    font-size: 14px;
-    border: 1px solid ${theme.border};
-    border-radius: 4px;
-    background: ${theme.bg};
-    color: ${theme.fg};
-    cursor: pointer;
-    font-family: sans-serif;
-  `;
-  fullscreenBtn.onmouseenter = () => { fullscreenBtn.style.background = theme.accent; fullscreenBtn.style.color = "#fff"; };
-  fullscreenBtn.onmouseleave = () => { fullscreenBtn.style.background = theme.bg; fullscreenBtn.style.color = theme.fg; };
-  
-  fullscreenBtn.onclick = () => {
-    if (elements.iframe) {
-      if (elements.iframe.requestFullscreen) {
-        elements.iframe.requestFullscreen();
-      } else if (elements.iframe.webkitRequestFullscreen) {
-        elements.iframe.webkitRequestFullscreen();
-      } else if (elements.iframe.mozRequestFullScreen) {
-        elements.iframe.mozRequestFullScreen();
-      } else if (elements.iframe.msRequestFullscreen) {
-        elements.iframe.msRequestFullscreen();
-      }
-    }
-  };
-  controls.appendChild(fullscreenBtn);
-
-  const downloadBtn = document.createElement("button");
-  downloadBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" width="16" height="16">
-    <path fill="${theme.fg}" d="M5.625 15c0-.4142-.33579-.75-.75-.75s-.75.3358-.75.75h1.5Zm-.75 1h-.75.75Zm14.4-1c0-.4142-.3358-.75-.75-.75s-.75.3358-.75.75h1.5Zm-8.1664.5387c-.2547.3266-.1965.7979.1301 1.0527.3266.2547.7979.1965 1.0527-.1301l-1.1828-.9226Zm5.0828-4.0774c.2547-.3266.1965-.7979-.1301-1.0527-.3266-.2547-.7979-.1965-1.0527.1301l1.1828.9226Zm-5.0828 5c.2548.3266.7261.3848 1.0527.1301.3266-.2548.3848-.7261.1301-1.0527l-1.1828.9226Zm-2.71722-5.9226c-.25476-.3266-.72605-.3848-1.05265-.1301-.32661.2548-.38486.7261-.13011 1.0527l1.18276-.9226ZM10.95 16c0 .4142.3358.75.75.75s.75-.3358.75-.75h-1.5Zm1.5-11c0-.41421-.3358-.75-.75-.75s-.75.33579-.75.75h1.5ZM4.125 15v1h1.5v-1h-1.5Zm0 1c0 2.0531 1.62757 3.75 3.675 3.75v-1.5c-1.18343 0-2.175-.9893-2.175-2.25h-1.5ZM7.8 19.75h7.8v-1.5H7.8v1.5Zm7.8 0c2.0474 0 3.675-1.6969 3.675-3.75h-1.5c0 1.2607-.9916 2.25-2.175 2.25v1.5ZM19.275 16v-1h-1.5v1h1.5Zm-6.9836.4613 3.9-5-1.1828-.9226-3.9 5 1.1828.9226Zm0-.9226-3.90002-5-1.18276.9226 3.89998 5 1.1828-.9226ZM12.45 16V5h-1.5v11h1.5Z"/>
-  </svg>`;
-  downloadBtn.title = "Download";
-  downloadBtn.style.cssText = `
-    padding: 2px 4px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid ${theme.border};
-    border-radius: 4px;
-    background: ${theme.bg};
-    cursor: pointer;
-  `;
-  const updateDownloadSvg = (color) => {
-    const path = downloadBtn.querySelector("path");
-    if (path) path.setAttribute("fill", color);
-  };
-  downloadBtn.onmouseenter = () => { downloadBtn.style.background = theme.accent; updateDownloadSvg("#fff"); };
-  downloadBtn.onmouseleave = () => { downloadBtn.style.background = theme.bg; updateDownloadSvg(theme.fg); };
-  
-  downloadBtn.onclick = async () => {
-    let content = getNodeContent(node, elements);
-    if (!content) {
-      content = elements.textarea?.value || "";
-    }
-    if (!content) {
-      alert("No content to download");
-      return;
-    }
-    
-    const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    
-    try {
-      if (content.includes(LIST_SEPARATOR)) {
-        const items = content.split(LIST_SEPARATOR);
-        const files = items.map((item, idx) => {
-          const itemType = detectContentType(item);
-          const extensions = { html: "html", svg: "svg", markdown: "md", python: "py", javascript: "js", css: "css", text: "txt" };
-          const ext = extensions[itemType] || "txt";
-          return { name: `item_${String(idx + 1).padStart(3, "0")}.${ext}`, content: item };
-        });
-        
-        const zipBlob = await createZipBlob(files);
-        const url = URL.createObjectURL(zipBlob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `content_${timestamp}.zip`;
-        a.style.display = "none";
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-        }, 100);
-      } else {
-        const contentType = detectContentType(content);
-        const extensions = { html: "html", svg: "svg", markdown: "md", python: "py", javascript: "js", css: "css", text: "txt" };
-        const ext = extensions[contentType] || "txt";
-        const filename = `content_${timestamp}.${ext}`;
-        
-        const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        a.style.display = "none";
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-        }, 100);
-      }
-    } catch (e) {
-      console.error("[WAS Viewer] download error:", e);
-    }
-  };
-  controls.appendChild(downloadBtn);
-
-  elements.typeLabel = typeLabel;
-  return controls;
-}
-
 function ensureElementsForNode(node) {
-  cleanupOrphanElements();
   ensureCleanupRunning();
 
   const key = String(node.id);
   const existing = STATE.nodeIdToElements.get(key);
   if (existing) return existing;
 
+  const container = getContainer();
+  if (!container) return null;
+
   const theme = computeThemeTokens();
 
   const wrapper = document.createElement("div");
   wrapper.style.cssText = `
-    position: absolute;
+    position: fixed;
     display: flex;
     flex-direction: column;
     pointer-events: none;
+    transform-origin: 0 0;
+    background: ${theme.bg};
+    border-radius: 0 0 8px 8px;
+    overflow: hidden;
+    z-index: 10;
   `;
 
-  const contentWrapper = document.createElement("div");
-  
   const elements = {
     wrapper,
-    contentWrapper,
+    contentWrapper: null,
     controls: null,
     iframe: null,
     textarea: null,
@@ -1613,11 +353,22 @@ function ensureElementsForNode(node) {
     isEditing: false,
     listEditContainer: null,
     listTextareas: null,
+    mutedOverlay: null,
+    isMuted: false,
   };
 
-  const controls = createControlsBar(node, elements);
+  const controls = createControlsBar(node, elements, {
+    getNodeContent,
+    setWidgetValue,
+    updateIframeContent,
+    buildIframeContent,
+    app,
+    onViewChange: handleViewChange,
+  });
   wrapper.appendChild(controls);
   elements.controls = controls;
+
+  const contentWrapper = document.createElement("div");
   contentWrapper.style.cssText = `
     position: relative;
     flex: 1;
@@ -1627,7 +378,7 @@ function ensureElementsForNode(node) {
   `;
 
   const iframe = document.createElement("iframe");
-  iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-pointer-lock allow-downloads");
+  iframe.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-modals allow-pointer-lock allow-downloads");
   iframe.setAttribute("allow", "fullscreen");
   iframe.setAttribute("allowfullscreen", "true");
   iframe.style.cssText = `
@@ -1643,10 +394,9 @@ function ensureElementsForNode(node) {
   `;
   contentWrapper.appendChild(iframe);
   elements.iframe = iframe;
-  
+
   const initialHtml = buildIframeContent("<p style='opacity:0.5;text-align:center;margin-top:40px;'>No content. Click Edit to add content or connect a STRING input.</p>", "html", theme);
   iframe.srcdoc = initialHtml;
-  if (elements.typeLabel) elements.typeLabel.textContent = "Type: Text";
 
   const textarea = document.createElement("textarea");
   textarea.style.cssText = `
@@ -1671,9 +421,34 @@ function ensureElementsForNode(node) {
   contentWrapper.appendChild(textarea);
   elements.textarea = textarea;
 
-  wrapper.appendChild(contentWrapper);
+  const mutedOverlay = document.createElement("div");
+  mutedOverlay.style.cssText = `
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: ${theme.bg};
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 8px;
+    border-radius: 0 0 8px 8px;
+    pointer-events: auto;
+  `;
+  mutedOverlay.innerHTML = `
+    <span style="font-size: 32px; opacity: 0.3;">🔇</span>
+    <span style="font-size: 12px; opacity: 0.5; font-family: sans-serif;">Node is muted/bypassed</span>
+    <span style="font-size: 10px; opacity: 0.3; font-family: sans-serif;">Unmute to load content</span>
+  `;
+  contentWrapper.appendChild(mutedOverlay);
+  elements.mutedOverlay = mutedOverlay;
 
-  getContainer().appendChild(wrapper);
+  wrapper.appendChild(contentWrapper);
+  elements.contentWrapper = contentWrapper;
+
+  document.body.appendChild(wrapper);
   STATE.nodeIdToElements.set(key, elements);
 
   const oldOnRemoved = node.onRemoved;
@@ -1693,19 +468,35 @@ function ensureElementsForNode(node) {
 function updateElementsRect(node, elements) {
   const canvas = app.canvas;
   const canvasEl = canvas?.canvas;
-  if (!canvasEl) return;
+  if (!canvasEl || !elements?.wrapper) return;
 
-  const rect = canvasEl.getBoundingClientRect();
-  
   const ds = canvas.ds;
   const scale = ds?.scale ?? 1;
   const offset = ds?.offset ?? [0, 0];
 
-  const x = (node.pos[0] + offset[0]) * scale;
-  const y = (node.pos[1] + offset[1]) * scale;
-  const w = node.size[0] * scale;
-  const h = node.size[1] * scale;
+  let isNodeVisible = true;
+  if (typeof canvas.isNodeVisible === 'function') {
+    isNodeVisible = canvas.isNodeVisible(node);
+  } else if (canvas.visible_area && node.size) {
+    const va = canvas.visible_area;
+    const nodeRight = node.pos[0] + node.size[0];
+    const nodeBottom = node.pos[1] + node.size[1];
+    isNodeVisible = !(
+      nodeRight < va[0] ||
+      node.pos[0] > va[0] + va[2] ||
+      nodeBottom < va[1] ||
+      node.pos[1] > va[1] + va[3]
+    );
+  }
+  const isCollapsed = !!node.flags?.collapsed;
+  
+  if (!isNodeVisible || isCollapsed) {
+    elements.wrapper.style.display = "none";
+    return;
+  }
 
+  const canvasRect = canvasEl.getBoundingClientRect();
+  
   const titleHRaw =
     (typeof node?.title_height === "number" && Number.isFinite(node.title_height) && node.title_height) ||
     (typeof node?.constructor?.title_height === "number" &&
@@ -1714,98 +505,72 @@ function updateElementsRect(node, elements) {
     globalThis?.LiteGraph?.NODE_TITLE_HEIGHT ||
     30;
   
-  const insetX = 8;
-  const insetBottom = 8;
-  
-  const innerX = x + insetX * scale;
-  const innerY = y + (titleHRaw - 5) * scale;
-  const innerW = (node.size[0] - insetX * 2);
-  const innerH = (node.size[1] - titleHRaw + 5 - insetBottom);
+  const margin = 10;
+  const widgetX = node.pos[0] + margin;
+  const widgetY = node.pos[1] + margin + titleHRaw;
+  const screenX = (widgetX + offset[0]) * scale + canvasRect.left;
+  const screenY = (widgetY + offset[1]) * scale + canvasRect.top;
+  const widgetW = node.size[0] - margin * 2;
+  const widgetH = node.size[1] - titleHRaw - margin * 2;
 
-  const nx = Number.isFinite(innerX) ? innerX : 0;
-  const ny = Number.isFinite(innerY) ? innerY : 0;
-  const nw = Number.isFinite(innerW) ? innerW : 0;
-  const nh = Number.isFinite(innerH) ? innerH : 0;
-
-  elements.wrapper.style.left = `${Math.round(nx)}px`;
-  elements.wrapper.style.top = `${Math.round(ny)}px`;
-  elements.wrapper.style.width = `${Math.max(0, Math.round(nw))}px`;
-  elements.wrapper.style.height = `${Math.max(0, Math.round(nh))}px`;
-  elements.wrapper.style.transform = `scale(${scale})`;
-  elements.wrapper.style.transformOrigin = 'top left';
-
-  const isCollapsed = !!node.flags?.collapsed;
+  const nw = Math.max(0, Math.round(widgetW));
+  const nh = Math.max(0, Math.round(widgetH));
   const hasArea = nw >= 2 && nh >= 2;
-  
-  const isOffScreen = (x + w < 0) || (x > rect.width) || 
-                      (y + h < 0) || (y > rect.height);
-  
-  elements.wrapper.style.display = (!isCollapsed && hasArea && !isOffScreen) ? "flex" : "none";
-}
 
-function updateIframeContent(node, elements) {
-  if (elements.isEditing) return;
-
-  const content = getNodeContent(node, elements);
-  const contentHash = content ? content.length + "_" + content.slice(0, 100) : "";
-  
-  if (contentHash === elements.lastContentHash) return;
-  elements.lastContentHash = contentHash;
-
-  const contentType = detectContentType(content);
-  const theme = computeThemeTokens();
-  
-  if (elements.typeLabel) {
-    const typeNames = {
-      html: "HTML",
-      svg: "SVG",
-      markdown: "Markdown",
-      python: "Python",
-      javascript: "JavaScript",
-      css: "CSS",
-      json: "JSON",
-      yaml: "YAML",
-      csv: "CSV",
-      ansi: "Terminal",
-      text: "Text",
-    };
-    elements.typeLabel.textContent = `Type: ${typeNames[contentType] || "Unknown"}`;
-  }
-
-  const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
-  const isListContent = content && content.includes(LIST_SEPARATOR);
-  
-  let excluded = [];
-  const metaWidget = node.widgets?.find(w => w.name === "viewer_meta");
-  if (metaWidget?.value) {
-    try {
-      const meta = JSON.parse(metaWidget.value);
-      excluded = Array.isArray(meta.excluded) ? meta.excluded : [];
-    } catch {}
-  }
-  
-  if (elements.toggleAllBtn) {
-    elements.toggleAllBtn.style.display = isListContent ? "block" : "none";
-    if (isListContent) {
-      elements.toggleAllBtn.textContent = excluded.length === 0 ? "☑" : "☐";
-      elements.toggleAllBtn.title = excluded.length === 0 ? "Uncheck All" : "Check All";
-    }
-  }
-
-  if (!content) {
-    const emptyHtml = buildIframeContent("<p style='opacity:0.5;text-align:center;margin-top:40px;'>No content. Click Edit to add content or connect a STRING input.</p>", "html", theme);
-    elements.iframe.srcdoc = emptyHtml;
+  if (!hasArea) {
+    elements.wrapper.style.display = "none";
     return;
   }
-  const html = buildIframeContent(content, contentType, theme, excluded);
+
+  elements.wrapper.style.position = 'fixed';
+  elements.wrapper.style.left = `${screenX}px`;
+  elements.wrapper.style.top = `${screenY}px`;
+  elements.wrapper.style.width = `${nw}px`;
+  elements.wrapper.style.height = `${nh}px`;
+  elements.wrapper.style.transform = `scale(${scale})`;
+  elements.wrapper.style.transformOrigin = '0 0';
+  elements.wrapper.style.display = "flex";
+}
+
+function processIframeQueue() {
+  if (STATE.iframeLoading || STATE.iframeLoadQueue.length === 0) return;
   
-  const needsBlobUrl = contentType === "html" && (
-    content.includes("WebAssembly") ||
-    content.includes("wasm") ||
-    content.includes("createUnityInstance") ||
-    content.includes("ServiceWorker") ||
-    content.includes("SharedArrayBuffer")
-  );
+  STATE.iframeLoading = true;
+  const { elements, html, needsBlobUrl, scriptData } = STATE.iframeLoadQueue.shift();
+  
+  if (!elements?.iframe) {
+    STATE.iframeLoading = false;
+    processIframeQueue();
+    return;
+  }
+  
+  const onLoad = () => {
+    elements.iframe.removeEventListener("load", onLoad);
+    
+    // Inject scripts via postMessage after iframe loads
+    if (scriptData && scriptData.length > 0) {
+      try {
+        elements.iframe.contentWindow.postMessage({
+          type: 'was-inject-scripts',
+          scripts: scriptData
+        }, '*');
+      } catch (e) {
+        console.error('[WAS Viewer] Failed to inject scripts:', e);
+      }
+    }
+    
+    STATE.iframeLoading = false;
+    setTimeout(processIframeQueue, 150);
+  };
+  
+  elements.iframe.addEventListener("load", onLoad);
+  
+  setTimeout(() => {
+    if (STATE.iframeLoading) {
+      STATE.iframeLoading = false;
+      processIframeQueue();
+    }
+  }, 3000);
   
   if (needsBlobUrl) {
     if (elements.lastBlobUrl) {
@@ -1824,30 +589,172 @@ function updateIframeContent(node, elements) {
   }
 }
 
+function updateIframeContent(node, elements, forceView = null) {
+  if (elements.isEditing) return;
+
+  const content = getNodeContent(node, elements);
+  const contentHash = content ? content.length + "_" + content.slice(0, 100) : "";
+  
+  // Skip update if content hasn't changed and no forced view switch
+  if (contentHash === elements.lastContentHash && !forceView) return;
+  elements.lastContentHash = contentHash;
+
+  const theme = computeThemeTokens();
+  
+  // Handle multi-view content
+  let displayContent = content;
+  let contentType;
+  let currentView = forceView || elements.currentView;
+  
+  if (isMultiviewContent(content)) {
+    const multiview = parseMultiviewContent(content);
+    if (multiview) {
+      // Use forced view, current view, or default
+      if (!currentView || !multiview.views.find(v => v.name === currentView)) {
+        currentView = multiview.defaultView;
+      }
+      
+      // Get content for selected view
+      const viewData = multiview.views.find(v => v.name === currentView);
+      if (viewData) {
+        displayContent = viewData.displayContent;
+      }
+      
+      // Store current view selection
+      elements.currentView = currentView;
+      elements.multiviewContent = content; // Store full payload for view switching
+      
+      // Update view selector dropdown
+      updateViewSelector(elements.viewSelector, content, currentView);
+      
+      // Detect content type from the view-specific content
+      contentType = detectContentType(displayContent);
+    } else {
+      contentType = detectContentType(content);
+    }
+  } else {
+    contentType = detectContentType(content);
+    elements.currentView = null;
+    elements.multiviewContent = null;
+    
+    // Hide view selector for non-multiview content
+    if (elements.viewSelector) {
+      elements.viewSelector.style.display = "none";
+    }
+  }
+  
+  if (elements.typeLabel) {
+    elements.typeLabel.textContent = `Type: ${getViewDisplayName(contentType)}`;
+  }
+
+  const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
+  const isListContent = displayContent && displayContent.includes(LIST_SEPARATOR);
+  
+  let excluded = [];
+  
+  const metaWidget = node.widgets?.find(w => w.name === "viewer_meta");
+  if (metaWidget?.value) {
+    try {
+      const meta = JSON.parse(metaWidget.value);
+      excluded = Array.isArray(meta.excluded) ? meta.excluded : [];
+    } catch {}
+  }
+  
+  if (elements.toggleAllBtn) {
+    elements.toggleAllBtn.style.display = isListContent ? "block" : "none";
+    if (isListContent) {
+      elements.toggleAllBtn.textContent = excluded.length === 0 ? "☑" : "☐";
+      elements.toggleAllBtn.title = excluded.length === 0 ? "Uncheck All" : "Check All";
+    }
+  }
+
+  const savedViewState = getViewState(contentType, node);
+  const finalContent = injectViewState(contentType, displayContent, savedViewState);
+
+  let html;
+  const nodeId = String(node.id);
+  if (!displayContent) {
+    html = buildIframeContent("<p style='opacity:0.5;text-align:center;margin-top:40px;'>No content. Click Edit to add content or connect a STRING input.</p>", "html", theme, [], nodeId);
+  } else {
+    html = buildIframeContent(finalContent, contentType, theme, excluded, nodeId);
+  }
+  
+  const needsBlobUrl = displayContent && contentType === "html" && (
+    displayContent.includes("WebAssembly") ||
+    displayContent.includes("wasm") ||
+    displayContent.includes("createUnityInstance") ||
+    displayContent.includes("ServiceWorker") ||
+    displayContent.includes("SharedArrayBuffer")
+  );
+  
+  // Get script data for postMessage injection
+  const scriptData = displayContent ? getViewScriptData(contentType, finalContent) : [];
+  
+  STATE.iframeLoadQueue = STATE.iframeLoadQueue.filter(item => item.elements !== elements);
+  STATE.iframeLoadQueue.push({ elements, html, needsBlobUrl, scriptData });
+  processIframeQueue();
+}
+
+/**
+ * Handle view change from dropdown selector
+ * @param {object} node - ComfyUI node
+ * @param {object} elements - DOM elements container
+ * @param {string} viewName - Name of view to switch to
+ */
+function handleViewChange(node, elements, viewName) {
+  if (!elements.multiviewContent) return;
+  
+  // Force content hash change to trigger update
+  elements.lastContentHash = "";
+  updateIframeContent(node, elements, viewName);
+}
+
 window.addEventListener("message", (event) => {
   if (event.data?.type === "was-viewer-toggle") {
-    const { idx, checked } = event.data;
-    for (const [nodeId, elements] of STATE.nodeIdToElements.entries()) {
-      if (elements.iframe?.contentWindow === event.source) {
-        const node = app.graph?.getNodeById(parseInt(nodeId));
-        if (node) {
-          const metaWidget = node.widgets?.find(w => w.name === "viewer_meta");
-          if (metaWidget) {
-            let meta = { lastInputHash: "", excluded: [] };
-            try {
-              meta = JSON.parse(metaWidget.value || "{}");
-              if (!Array.isArray(meta.excluded)) meta.excluded = [];
-            } catch {}
-            if (checked) {
-              meta.excluded = meta.excluded.filter(i => i !== idx);
-            } else {
-              if (!meta.excluded.includes(idx)) meta.excluded.push(idx);
-            }
-            metaWidget.value = JSON.stringify(meta);
-            node.setDirtyCanvas?.(true, true);
-          }
+    const { idx, checked, nodeId } = event.data;
+    
+    if (!nodeId) {
+      return;
+    }
+    
+    const node = app.graph?.getNodeById(parseInt(nodeId));
+    if (node) {
+      const metaWidget = node.widgets?.find(w => w.name === "viewer_meta");
+      if (metaWidget) {
+        let meta = { lastInputHash: "", excluded: [] };
+        try {
+          meta = JSON.parse(metaWidget.value || "{}");
+          if (!Array.isArray(meta.excluded)) meta.excluded = [];
+        } catch {}
+        if (checked) {
+          meta.excluded = meta.excluded.filter(i => i !== idx);
+        } else {
+          if (!meta.excluded.includes(idx)) meta.excluded.push(idx);
         }
-        break;
+        metaWidget.value = JSON.stringify(meta);
+        node.setDirtyCanvas?.(true, true);
+      }
+    }
+  } else {
+    const messageType = event.data?.type;
+    const nodeId = event.data?.nodeId;
+    
+    // Route message to appropriate view handler
+    // For messages without nodeId (like requestImages), find node by iframe source
+    if (messageType && !nodeId) {
+      for (const [nId, elements] of STATE.nodeIdToElements.entries()) {
+        if (elements.iframe && elements.iframe.contentWindow === event.source) {
+          const node = app.graph?.getNodeById(parseInt(nId));
+          if (node) {
+            handleViewMessage(messageType, event.data, node, app, event.source);
+          }
+          break;
+        }
+      }
+    } else if (messageType && nodeId) {
+      const node = app.graph?.getNodeById(parseInt(nodeId));
+      if (node) {
+        handleViewMessage(messageType, event.data, node, app, event.source);
       }
     }
   }
@@ -1855,10 +762,12 @@ window.addEventListener("message", (event) => {
 
 app.registerExtension({
   name: EXT_NAME,
+  
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData?.name !== NODE_NAME) return;
 
     ensureCleanupRunning();
+    startHangerCheck();
 
     const oldOnNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
@@ -1891,24 +800,23 @@ app.registerExtension({
           metaWidget.serializeValue = () => metaWidget.value;
         }
 
+        let viewStateWidget = this.widgets?.find((w) => w.name === "view_state");
+        if (!viewStateWidget) {
+          viewStateWidget = this.addWidget("text", "view_state", "{}", () => {});
+        }
+        if (viewStateWidget) {
+          viewStateWidget.type = "hidden";
+          viewStateWidget.computeSize = () => [0, -4];
+          viewStateWidget.serializeValue = () => viewStateWidget.value;
+        }
+
         for (const w of this.widgets || []) {
-          if (w.name === "manual_content") continue;
           w.type = "hidden";
           w.computeSize = () => [0, -4];
+          w.draw = () => {}; // Prevent any drawing
         }
 
         this.setDirtyCanvas?.(true, true);
-        
-        const node = this;
-        setTimeout(() => {
-          try {
-            const elements = ensureElementsForNode(node);
-            updateElementsRect(node, elements);
-            updateIframeContent(node, elements);
-          } catch (e) {
-            console.error("[WAS Viewer] onNodeCreated delayed init error:", e);
-          }
-        }, 50);
       } catch (e) {
         console.error("[WAS Viewer] onNodeCreated error:", e);
       }
@@ -1920,8 +828,12 @@ app.registerExtension({
       const r = oldOnDrawForeground ? oldOnDrawForeground.apply(this, arguments) : undefined;
       try {
         const elements = ensureElementsForNode(this);
-        updateElementsRect(this, elements);
-        updateIframeContent(this, elements);
+        if (elements) {
+          updateElementsRect(this, elements);
+          if (!elements.lastContentHash) {
+            updateIframeContent(this, elements);
+          }
+        }
       } catch (e) {
         console.error("[WAS Viewer] onDrawForeground error:", e);
       }
@@ -1932,8 +844,10 @@ app.registerExtension({
     nodeType.prototype.onResize = function (size) {
       const r = oldOnResize ? oldOnResize.apply(this, arguments) : undefined;
       try {
-        const elements = ensureElementsForNode(this);
-        updateElementsRect(this, elements);
+        const elements = STATE.nodeIdToElements.get(String(this.id));
+        if (elements) {
+          updateElementsRect(this, elements);
+        }
       } catch (e) {
         console.error("[WAS Viewer] onResize error:", e);
       }
@@ -1946,9 +860,10 @@ app.registerExtension({
       try {
         const isInputSlot = slotType === 1;
         const contentInputIndex = this.inputs?.findIndex((i) => i.name === "content");
-        const isContentInput = isInputSlot && contentInputIndex === slotIndex;
+        const imagesInputIndex = this.inputs?.findIndex((i) => i.name === "images");
+        const isRelevantInput = isInputSlot && (contentInputIndex === slotIndex || imagesInputIndex === slotIndex);
         
-        if (isContentInput) {
+        if (isRelevantInput) {
           const contentWidget = this.widgets?.find((w) => w.name === "content");
           if (contentWidget) {
             contentWidget.value = "";
@@ -1999,10 +914,23 @@ app.registerExtension({
             }
           }
         }
+        
+        const viewStateWidget = this.widgets?.find((w) => w.name === "view_state");
+        if (viewStateWidget) {
+          viewStateWidget.type = "hidden";
+          viewStateWidget.computeSize = () => [0, -4];
+          if (data?.widgets_values) {
+            const idx = this.widgets.findIndex(w => w.name === "view_state");
+            if (idx >= 0 && data.widgets_values[idx] !== undefined) {
+              viewStateWidget.value = data.widgets_values[idx];
+            }
+          }
+        }
+        
         const node = this;
         setTimeout(() => {
           try {
-            const elements = ensureElementsForNode(node);
+            const elements = STATE.nodeIdToElements.get(String(node.id));
             if (elements) {
               elements.lastContentHash = "";
               updateIframeContent(node, elements);
@@ -2025,6 +953,34 @@ app.registerExtension({
         const sourceContent = message?.source_content?.[0] || "";
         const sourceContentHash = message?.content_hash?.[0] || "";
         
+        const viewStateWidget = this.widgets?.find(w => w.name === "view_state");
+        let hasViewOutput = false;
+        if (viewStateWidget?.value) {
+          try {
+            const viewState = JSON.parse(viewStateWidget.value);
+            hasViewOutput = Object.keys(viewState).some(k => k.endsWith("_output") && viewState[k]);
+            
+            // Clear b64 output data after execution to avoid workflow quota issues
+            if (hasViewOutput) {
+              let modified = false;
+              for (const key of Object.keys(viewState)) {
+                if (key.endsWith("_output") && viewState[key]) {
+                  delete viewState[key];
+                  modified = true;
+                }
+              }
+              if (modified) {
+                viewStateWidget.value = JSON.stringify(viewState);
+                console.log("[WAS Viewer] Cleared output data from view_state after execution. If you encountered a 'Workflow Quota Exceeded' error, that overflow has been purged.");
+              }
+            }
+          } catch {}
+        }
+        
+        if (hasViewOutput) {
+          return r;
+        }
+        
         const metaWidget = this.widgets?.find(w => w.name === "viewer_meta");
         let meta = { lastInputHash: "", excluded: [] };
         try {
@@ -2034,13 +990,10 @@ app.registerExtension({
         } catch {}
         
         if (sourceContentHash && meta.lastInputHash === sourceContentHash) {
-          console.log("[WAS Viewer] onExecuted: source content hash unchanged (cached), skipping update");
           return r;
         }
         
         if (sourceContent) {
-          console.log("[WAS Viewer] onExecuted: new source content, hash:", sourceContentHash, "preview:", sourceContent?.slice(0, 256));
-          
           meta.lastInputHash = sourceContentHash;
           meta.excluded = [];
           if (metaWidget) {
@@ -2054,7 +1007,6 @@ app.registerExtension({
             updateIframeContent(this, elements);
           }
         } else if (displayText !== undefined && displayText !== null && displayText !== "") {
-          console.log("[WAS Viewer] onExecuted: no source content, using display text");
           setWidgetValue(this, "manual_content", String(displayText));
           const elements = STATE.nodeIdToElements.get(String(this.id));
           if (elements) {
@@ -2072,17 +1024,29 @@ app.registerExtension({
     nodeType.prototype.serialize = function () {
       const data = oldSerialize ? oldSerialize.apply(this, arguments) : {};
       try {
+        if (!data.widgets_values) {
+          data.widgets_values = [];
+        }
+        
         const manualWidget = this.widgets?.find((w) => w.name === "manual_content");
-        if (manualWidget && manualWidget.value) {
-          if (!data.widgets_values) {
-            data.widgets_values = [];
-          }
+        if (manualWidget) {
           const idx = this.widgets.findIndex(w => w.name === "manual_content");
           if (idx >= 0) {
             while (data.widgets_values.length <= idx) {
               data.widgets_values.push(null);
             }
-            data.widgets_values[idx] = manualWidget.value;
+            data.widgets_values[idx] = manualWidget.value || "";
+          }
+        }
+        
+        const viewStateWidget = this.widgets?.find((w) => w.name === "view_state");
+        if (viewStateWidget) {
+          const idx = this.widgets.findIndex(w => w.name === "view_state");
+          if (idx >= 0) {
+            while (data.widgets_values.length <= idx) {
+              data.widgets_values.push(null);
+            }
+            data.widgets_values[idx] = viewStateWidget.value || "{}";
           }
         }
       } catch (e) {

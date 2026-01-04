@@ -1,0 +1,482 @@
+/**
+ * View Loader for ComfyUI Viewer
+ * Dynamically loads and manages view extensions from the /views/ directory.
+ * 
+ * Views are loaded from view_manifest.js which lists available view files.
+ * Extensions can register additional views by calling registerView() after load.
+ */
+
+import { VIEW_FILES } from "./view_manifest.js";
+
+const VIEW_REGISTRY = new Map();
+let viewsLoaded = false;
+let loadPromise = null;
+
+/**
+ * Get the base path for view modules
+ * @returns {string}
+ */
+function getViewsBasePath() {
+  const basePath = import.meta.url.substring(0, import.meta.url.lastIndexOf("/"));
+  return basePath;
+}
+
+/**
+ * Register a view module
+ * @param {object} viewModule - View module with static methods
+ */
+export function registerView(viewModule) {
+  if (!viewModule.id) {
+    console.error("[WAS Viewer] View module missing id:", viewModule);
+    return;
+  }
+  VIEW_REGISTRY.set(viewModule.id, viewModule);
+  console.log(`[WAS Viewer] Registered view: ${viewModule.id}`);
+}
+
+/**
+ * Get a registered view by id
+ * @param {string} id 
+ * @returns {object|null}
+ */
+export function getView(id) {
+  return VIEW_REGISTRY.get(id) || null;
+}
+
+/**
+ * Get all registered views
+ * @returns {Map}
+ */
+export function getAllViews() {
+  return VIEW_REGISTRY;
+}
+
+/**
+ * Load all view modules from the views directory
+ * @returns {Promise<void>}
+ */
+export async function loadAllViews() {
+  if (viewsLoaded) return;
+  if (loadPromise) return loadPromise;
+
+  loadPromise = (async () => {
+    const basePath = getViewsBasePath();
+    
+    for (const file of VIEW_FILES) {
+      try {
+        const module = await import(`${basePath}/${file}`);
+        if (module.default) {
+          registerView(module.default);
+        }
+      } catch (e) {
+        console.error(`[WAS Viewer] Failed to load view module: ${file}`, e);
+      }
+    }
+
+    viewsLoaded = true;
+    console.log(`[WAS Viewer] Loaded ${VIEW_REGISTRY.size} view modules`);
+  })();
+
+  return loadPromise;
+}
+
+/**
+ * Initialize all view scripts
+ * @param {string} basePath - Base path for scripts (web folder)
+ * @returns {Promise<void>}
+ */
+export async function initializeViewScripts(basePath) {
+  const promises = [];
+  for (const [id, view] of VIEW_REGISTRY) {
+    if (view.loadScripts) {
+      promises.push(
+        view.loadScripts(basePath).catch(e => {
+          console.error(`[WAS Viewer] Failed to load scripts for view: ${id}`, e);
+        })
+      );
+    }
+  }
+  await Promise.all(promises);
+}
+
+/**
+ * Detect the best view for content
+ * @param {string} content - Content to analyze
+ * @returns {string} - View id
+ */
+export function detectContentType(content) {
+  if (!content || typeof content !== "string") return "text";
+  
+  const trimmed = content.trim();
+  let bestView = "text";
+  let bestScore = 0;
+
+  const sortedViews = Array.from(VIEW_REGISTRY.values())
+    .sort((a, b) => (b.priority || 0) - (a.priority || 0));
+
+  for (const view of sortedViews) {
+    if (view.detect) {
+      const score = view.detect(trimmed);
+      if (score > bestScore) {
+        bestScore = score;
+        bestView = view.id;
+      }
+    }
+  }
+
+  return bestScore >= 2 ? bestView : "text";
+}
+
+/**
+ * Render content using the appropriate view
+ * @param {string} content - Content to render
+ * @param {string} contentType - Content type id
+ * @param {object} theme - Theme tokens
+ * @returns {string} - Rendered HTML
+ */
+export function renderContent(content, contentType, theme) {
+  const view = VIEW_REGISTRY.get(contentType);
+  if (view && view.render) {
+    return view.render(content, theme);
+  }
+  const textView = VIEW_REGISTRY.get("text");
+  if (textView && textView.render) {
+    return textView.render(content, theme);
+  }
+  return `<pre>${content}</pre>`;
+}
+
+/**
+ * Get styles for a view type
+ * @param {string} contentType 
+ * @param {object} theme 
+ * @returns {string}
+ */
+export function getViewStyles(contentType, theme) {
+  const view = VIEW_REGISTRY.get(contentType);
+  if (view && view.getStyles) {
+    return view.getStyles(theme);
+  }
+  return "";
+}
+
+/**
+ * Get scripts for a view type (returns HTML script tags - legacy)
+ * @param {string} contentType 
+ * @param {string} content 
+ * @returns {string}
+ */
+export function getViewScripts(contentType, content) {
+  const view = VIEW_REGISTRY.get(contentType);
+  if (view && view.getScripts) {
+    return view.getScripts(content);
+  }
+  return "";
+}
+
+/**
+ * Get raw script data for postMessage injection
+ * @param {string} contentType 
+ * @param {string} content 
+ * @returns {Array<{code: string, init?: string}>} Array of scripts to inject
+ */
+export function getViewScriptData(contentType, content) {
+  const view = VIEW_REGISTRY.get(contentType);
+  if (view && view.getScriptData) {
+    return view.getScriptData(content);
+  }
+  return [];
+}
+
+/**
+ * Check if a view is ready (scripts loaded)
+ * @param {string} contentType 
+ * @returns {boolean}
+ */
+export function isViewReady(contentType) {
+  const view = VIEW_REGISTRY.get(contentType);
+  if (view && view.isReady) {
+    return view.isReady();
+  }
+  return true;
+}
+
+/**
+ * Check if a view uses base iframe styles
+ * @param {string} contentType 
+ * @returns {boolean}
+ */
+export function viewUsesBaseStyles(contentType) {
+  const view = VIEW_REGISTRY.get(contentType);
+  if (view && typeof view.usesBaseStyles === 'function') {
+    return view.usesBaseStyles();
+  }
+  return true; // Default: use base styles
+}
+
+/**
+ * Get display name for a view type
+ * @param {string} contentType 
+ * @returns {string}
+ */
+export function getViewDisplayName(contentType) {
+  const view = VIEW_REGISTRY.get(contentType);
+  return view?.displayName || "Unknown";
+}
+
+/**
+ * Refresh callback registry for views that load scripts asynchronously
+ */
+const refreshCallbacks = new Set();
+
+export function onViewsRefresh(callback) {
+  refreshCallbacks.add(callback);
+}
+
+export function triggerViewsRefresh() {
+  for (const callback of refreshCallbacks) {
+    try {
+      callback();
+    } catch (e) {
+      console.error("[WAS Viewer] Refresh callback error:", e);
+    }
+  }
+}
+
+/**
+ * Find a view that handles a specific message type
+ * @param {string} messageType - The message type from postMessage
+ * @returns {object|null} - View module or null
+ */
+export function getViewForMessageType(messageType) {
+  for (const [id, view] of VIEW_REGISTRY) {
+    if (view.getMessageTypes && view.getMessageTypes().includes(messageType)) {
+      return view;
+    }
+  }
+  return null;
+}
+
+/**
+ * Get raw content from a node (checks manual_content widget first, then connected content)
+ * @param {object} node - The LiteGraph node
+ * @returns {string} - Raw content string
+ */
+function getNodeRawContent(node) {
+  // Check manual_content widget
+  const manualWidget = node.widgets?.find(w => w.name === "manual_content");
+  if (manualWidget?.value) {
+    return manualWidget.value;
+  }
+  return "";
+}
+
+/**
+ * Handle a message from an iframe by routing to the appropriate view
+ * Automatically extracts view-specific content from multiview payloads.
+ * 
+ * @param {string} messageType - The message type
+ * @param {object} data - The message data
+ * @param {object} node - The LiteGraph node
+ * @param {object} app - The ComfyUI app instance
+ * @param {Window} iframeSource - The iframe's contentWindow that sent the message
+ * @returns {boolean} - True if message was handled
+ */
+export function handleViewMessage(messageType, data, node, app, iframeSource = null) {
+  const view = getViewForMessageType(messageType);
+  if (view && view.handleMessage) {
+    // Get raw content and extract view-specific content if multiview
+    const rawContent = getNodeRawContent(node);
+    const viewContent = extractViewContent(rawContent, view.id);
+    
+    // Augment data with extracted content for the view
+    const augmentedData = {
+      ...data,
+      _viewContent: viewContent,  // View-specific content (multiview extracted)
+      _rawContent: rawContent,    // Original raw content
+    };
+    
+    return view.handleMessage(messageType, augmentedData, node, app, iframeSource);
+  }
+  return false;
+}
+
+/**
+ * Get view-specific state from node for a content type
+ * @param {string} contentType - The content type
+ * @param {object} node - The LiteGraph node
+ * @returns {object|null} - State object or null
+ */
+export function getViewState(contentType, node) {
+  const view = VIEW_REGISTRY.get(contentType);
+  if (view && view.getStateFromWidget) {
+    return view.getStateFromWidget(node);
+  }
+  return null;
+}
+
+/**
+ * Inject saved state into content for a content type
+ * @param {string} contentType - The content type
+ * @param {string} content - Original content
+ * @param {object} state - State to inject
+ * @returns {string} - Modified content
+ */
+export function injectViewState(contentType, content, state) {
+  if (!state) return content;
+  const view = VIEW_REGISTRY.get(contentType);
+  if (view && view.injectState) {
+    return view.injectState(content, state);
+  }
+  return content;
+}
+
+/**
+ * Strip content marker from content if present
+ * @param {string} content - Content that may have a marker prefix
+ * @returns {{ content: string, view: object|null }} - Stripped content and matched view
+ */
+export function stripContentMarker(content) {
+  if (!content || typeof content !== 'string') {
+    return { content: content || '', view: null };
+  }
+  
+  for (const [id, view] of VIEW_REGISTRY) {
+    if (view.getContentMarker) {
+      const marker = view.getContentMarker();
+      if (marker && content.startsWith(marker)) {
+        return { 
+          content: content.slice(marker.length), 
+          view: view 
+        };
+      }
+    }
+  }
+  
+  return { content, view: null };
+}
+
+/**
+ * Multi-view marker for content that can be displayed by multiple views
+ */
+export const MULTIVIEW_MARKER = "$WAS_MULTIVIEW$";
+
+/**
+ * Check if content is a multi-view payload
+ * @param {string} content - Content to check
+ * @returns {boolean}
+ */
+export function isMultiviewContent(content) {
+  return content && typeof content === 'string' && content.startsWith(MULTIVIEW_MARKER);
+}
+
+/**
+ * Parse multi-view payload and return view data
+ * @param {string} content - Multi-view content with marker
+ * @returns {{ defaultView: string, views: Array<{name: string, displayContent: string}> }|null}
+ */
+export function parseMultiviewContent(content) {
+  if (!isMultiviewContent(content)) return null;
+  
+  try {
+    const jsonStr = content.slice(MULTIVIEW_MARKER.length);
+    const data = JSON.parse(jsonStr);
+    
+    if (data.type !== 'multiview' || !Array.isArray(data.views)) {
+      return null;
+    }
+    
+    return {
+      defaultView: data.default_view,
+      views: data.views.map(v => ({
+        name: v.name,
+        priority: v.priority,
+        displayContent: v.display_content,
+        contentHash: v.content_hash,
+      })),
+    };
+  } catch (e) {
+    console.error('[WAS Viewer] Failed to parse multiview content:', e);
+    return null;
+  }
+}
+
+/**
+ * Get display content for a specific view from multi-view payload
+ * @param {string} content - Multi-view content
+ * @param {string} viewName - Name of view to get content for
+ * @returns {string|null} - View-specific display content or null
+ */
+export function getMultiviewContent(content, viewName) {
+  const parsed = parseMultiviewContent(content);
+  if (!parsed) return null;
+  
+  const view = parsed.views.find(v => v.name === viewName);
+  return view ? view.displayContent : null;
+}
+
+/**
+ * Get list of available views from multi-view payload
+ * @param {string} content - Multi-view content
+ * @returns {Array<{name: string, displayName: string}>}
+ */
+export function getMultiviewOptions(content) {
+  const parsed = parseMultiviewContent(content);
+  if (!parsed) return [];
+  
+  return parsed.views.map(v => ({
+    name: v.name,
+    displayName: getViewDisplayName(v.name),
+    priority: v.priority,
+  }));
+}
+
+/**
+ * Extract view-specific content from raw content (handles multiview automatically)
+ * This is the centralized function that view extensions should NOT need to call -
+ * the viewer system uses this to provide clean content to views.
+ * 
+ * @param {string} rawContent - Raw content that may be multiview or single-view
+ * @param {string} viewName - Name of the view to extract content for
+ * @returns {string} - View-specific content, or original content if not multiview
+ */
+export function extractViewContent(rawContent, viewName) {
+  if (!rawContent || typeof rawContent !== 'string') {
+    return rawContent || '';
+  }
+  
+  // Check if it's multiview content
+  if (!isMultiviewContent(rawContent)) {
+    return rawContent;
+  }
+  
+  // Extract view-specific content from multiview payload
+  const viewContent = getMultiviewContent(rawContent, viewName);
+  if (viewContent) {
+    return viewContent;
+  }
+  
+  // Fallback: return first available view's content
+  const parsed = parseMultiviewContent(rawContent);
+  if (parsed && parsed.views.length > 0) {
+    return parsed.views[0].displayContent;
+  }
+  
+  return rawContent;
+}
+
+/**
+ * Parse content with marker and return parsed data
+ * @param {string} content - Content that may have a marker prefix
+ * @returns {object|null} - Parsed JSON data or null
+ */
+export function parseMarkedContent(content) {
+  const { content: stripped, view } = stripContentMarker(content);
+  if (!stripped) return null;
+  
+  try {
+    return JSON.parse(stripped);
+  } catch {
+    return null;
+  }
+}

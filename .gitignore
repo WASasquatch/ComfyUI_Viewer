@@ -155,3 +155,9 @@ cython_debug/
 # Ignore Windows ADS quarantine metadata files
 *:Zone.Identifier
 *:zone.identifier
+
+# Ruff
+.ruff_cache
+
+# WAS Architect
+.was_arch
