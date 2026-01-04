@@ -5,6 +5,8 @@
 
 A powerful, extensible ComfyUI custom node with a modular **Views Extension System** that renders content in a secure embedded iframe viewer. Views are dynamically loaded and can be added, removed, or modified without touching core code.
 
+![Screenshot 9](screenshots/screenshot_14.jpg)
+
 <details>
 <summary><strong>Screenshots</strong></summary>
 
