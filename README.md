@@ -1,6 +1,7 @@
 # ComfyUI Content Viewer
 
-![Content Viewer](https://img.shields.io/badge/ComfyUI-Custom_Node-blue)
+![ComfyUI](https://img.shields.io/badge/ComfyUI-Custom_Node-blue) 
+![Frontend Extension](https://img.shields.io/badge/ComfyUI_Frontend-Extension-purple)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 A powerful, extensible ComfyUI custom node with a modular **Views Extension System** that renders content in a secure embedded iframe viewer. Views are dynamically loaded and can be added, removed, or modified without touching core code.
@@ -11,6 +12,7 @@ A powerful, extensible ComfyUI custom node with a modular **Views Extension Syst
 
 - [Screenshots](#screenshots)
 - [Features](#features)
+- [Third-Party Views](#third-party-views)
 - [Built-in Views](#built-in-views)
 - [Installation](#installation)
 - [Usage](#usage)
