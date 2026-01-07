@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 import { 
   loadAllViews, 
   initializeViewScripts, 
@@ -11,11 +12,12 @@ import {
   getViewScriptData,
   isMultiviewContent,
   parseMultiviewContent,
-  getMultiviewContent
+  getMultiviewContent,
+  isViewUI
 } from "./views/view_loader.js";
 import { loadPrismScripts } from "./views/code_scripts.js";
 import { computeThemeTokens } from "./utils/theme.js";
-import { createControlsBar, CONTROLS_HEIGHT, updateViewSelector } from "./controls/controls_bar.js";
+import { createControlsBar, CONTROLS_HEIGHT, updateViewSelector, updateControlsForUI } from "./controls/controls_bar.js";
 import { buildIframeContent, LIST_SEPARATOR } from "./iframe/iframe_builder.js";
 
 const EXT_NAME = "WAS.ContentViewer";
@@ -31,10 +33,8 @@ const STATE = {
   lastScale: 1,
   viewsInitialized: false,
   updateContainerBounds: null,
-  // Iframe loading queue to prevent browser overload
   iframeLoadQueue: [],
   iframeLoading: false,
-  // Hanger check interval
   hangerCheckIntervalId: null,
 };
 
@@ -168,7 +168,6 @@ function checkForHangers() {
     
     const node = app?.graph?.getNodeById(parseInt(nodeId));
     if (!node) {
-      // Node no longer exists, hide wrapper
       elements.wrapper.style.display = "none";
       continue;
     }
@@ -354,6 +353,7 @@ function ensureElementsForNode(node) {
     listEditContainer: null,
     listTextareas: null,
     mutedOverlay: null,
+    lowQualityOverlay: null,
     isMuted: false,
   };
 
@@ -445,6 +445,23 @@ function ensureElementsForNode(node) {
   contentWrapper.appendChild(mutedOverlay);
   elements.mutedOverlay = mutedOverlay;
 
+  const lowQualityOverlay = document.createElement("div");
+  lowQualityOverlay.style.cssText = `
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: ${theme.bg};
+    display: none;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0 0 8px 8px;
+    pointer-events: auto;
+  `;
+  contentWrapper.appendChild(lowQualityOverlay);
+  elements.lowQualityOverlay = lowQualityOverlay;
+
   wrapper.appendChild(contentWrapper);
   elements.contentWrapper = contentWrapper;
 
@@ -493,6 +510,18 @@ function updateElementsRect(node, elements) {
   if (!isNodeVisible || isCollapsed) {
     elements.wrapper.style.display = "none";
     return;
+  }
+  
+  // Check for low quality rendering mode (zoomed out past threshold)
+  const isLowQuality = canvas.low_quality === true;
+  if (elements.lowQualityOverlay) {
+    if (isLowQuality) {
+      elements.iframe.style.display = "none";
+      elements.lowQualityOverlay.style.display = "flex";
+    } else {
+      elements.iframe.style.display = "block";
+      elements.lowQualityOverlay.style.display = "none";
+    }
   }
 
   const canvasRect = canvasEl.getBoundingClientRect();
@@ -547,7 +576,6 @@ function processIframeQueue() {
   const onLoad = () => {
     elements.iframe.removeEventListener("load", onLoad);
     
-    // Inject scripts via postMessage after iframe loads
     if (scriptData && scriptData.length > 0) {
       try {
         elements.iframe.contentWindow.postMessage({
@@ -594,14 +622,10 @@ function updateIframeContent(node, elements, forceView = null) {
 
   const content = getNodeContent(node, elements);
   const contentHash = content ? content.length + "_" + content.slice(0, 100) : "";
-  
-  // Skip update if content hasn't changed and no forced view switch
   if (contentHash === elements.lastContentHash && !forceView) return;
   elements.lastContentHash = contentHash;
 
   const theme = computeThemeTokens();
-  
-  // Handle multi-view content
   let displayContent = content;
   let contentType;
   let currentView = forceView || elements.currentView;
@@ -609,25 +633,18 @@ function updateIframeContent(node, elements, forceView = null) {
   if (isMultiviewContent(content)) {
     const multiview = parseMultiviewContent(content);
     if (multiview) {
-      // Use forced view, current view, or default
       if (!currentView || !multiview.views.find(v => v.name === currentView)) {
         currentView = multiview.defaultView;
       }
       
-      // Get content for selected view
       const viewData = multiview.views.find(v => v.name === currentView);
       if (viewData) {
         displayContent = viewData.displayContent;
       }
       
-      // Store current view selection
       elements.currentView = currentView;
-      elements.multiviewContent = content; // Store full payload for view switching
-      
-      // Update view selector dropdown
+      elements.multiviewContent = content;
       updateViewSelector(elements.viewSelector, content, currentView);
-      
-      // Detect content type from the view-specific content
       contentType = detectContentType(displayContent);
     } else {
       contentType = detectContentType(content);
@@ -636,8 +653,6 @@ function updateIframeContent(node, elements, forceView = null) {
     contentType = detectContentType(content);
     elements.currentView = null;
     elements.multiviewContent = null;
-    
-    // Hide view selector for non-multiview content
     if (elements.viewSelector) {
       elements.viewSelector.style.display = "none";
     }
@@ -646,6 +661,8 @@ function updateIframeContent(node, elements, forceView = null) {
   if (elements.typeLabel) {
     elements.typeLabel.textContent = `Type: ${getViewDisplayName(contentType)}`;
   }
+  
+  updateControlsForUI(elements, isViewUI(contentType));
 
   const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
   const isListContent = displayContent && displayContent.includes(LIST_SEPARATOR);
@@ -687,7 +704,6 @@ function updateIframeContent(node, elements, forceView = null) {
     displayContent.includes("SharedArrayBuffer")
   );
   
-  // Get script data for postMessage injection
   const scriptData = displayContent ? getViewScriptData(contentType, finalContent) : [];
   
   STATE.iframeLoadQueue = STATE.iframeLoadQueue.filter(item => item.elements !== elements);
@@ -703,8 +719,6 @@ function updateIframeContent(node, elements, forceView = null) {
  */
 function handleViewChange(node, elements, viewName) {
   if (!elements.multiviewContent) return;
-  
-  // Force content hash change to trigger update
   elements.lastContentHash = "";
   updateIframeContent(node, elements, viewName);
 }
@@ -739,8 +753,6 @@ window.addEventListener("message", (event) => {
     const messageType = event.data?.type;
     const nodeId = event.data?.nodeId;
     
-    // Route message to appropriate view handler
-    // For messages without nodeId (like requestImages), find node by iframe source
     if (messageType && !nodeId) {
       for (const [nId, elements] of STATE.nodeIdToElements.entries()) {
         if (elements.iframe && elements.iframe.contentWindow === event.source) {
@@ -813,7 +825,7 @@ app.registerExtension({
         for (const w of this.widgets || []) {
           w.type = "hidden";
           w.computeSize = () => [0, -4];
-          w.draw = () => {}; // Prevent any drawing
+          w.draw = () => {};
         }
 
         this.setDirtyCanvas?.(true, true);
@@ -952,26 +964,50 @@ app.registerExtension({
         const displayText = message?.text?.[0];
         const sourceContent = message?.source_content?.[0] || "";
         const sourceContentHash = message?.content_hash?.[0] || "";
+        const inputHash = message?.input_hash?.[0] || "";
         
         const viewStateWidget = this.widgets?.find(w => w.name === "view_state");
+        
+        // Check if input changed and clear stale _output if so
+        let inputChanged = false;
+        if (inputHash && viewStateWidget) {
+          try {
+            const viewState = JSON.parse(viewStateWidget.value || "{}");
+            const storedHash = viewState._input_hash || "";
+            if (storedHash && storedHash !== inputHash) {
+              inputChanged = true;
+              for (const key of Object.keys(viewState)) {
+                if (key.endsWith("_output")) {
+                  delete viewState[key];
+                }
+              }
+              console.log("[WAS Viewer] Input changed, cleared stale view outputs");
+            }
+            viewState._input_hash = inputHash;
+            viewStateWidget.value = JSON.stringify(viewState);
+          } catch {}
+        }
+        
         let hasViewOutput = false;
-        if (viewStateWidget?.value) {
+        if (viewStateWidget?.value && !inputChanged) {
           try {
             const viewState = JSON.parse(viewStateWidget.value);
             hasViewOutput = Object.keys(viewState).some(k => k.endsWith("_output") && viewState[k]);
             
-            // Clear b64 output data after execution to avoid workflow quota issues
             if (hasViewOutput) {
               let modified = false;
               for (const key of Object.keys(viewState)) {
                 if (key.endsWith("_output") && viewState[key]) {
-                  delete viewState[key];
-                  modified = true;
+                  const valLen = typeof viewState[key] === "string" ? viewState[key].length : JSON.stringify(viewState[key]).length;
+                  if (valLen > 10000) {
+                    delete viewState[key];
+                    modified = true;
+                  }
                 }
               }
               if (modified) {
                 viewStateWidget.value = JSON.stringify(viewState);
-                console.log("[WAS Viewer] Cleared output data from view_state after execution. If you encountered a 'Workflow Quota Exceeded' error, that overflow has been purged.");
+                console.log("[WAS Viewer] Cleared large output data from view_state after execution.");
               }
             }
           } catch {}
@@ -1046,7 +1082,23 @@ app.registerExtension({
             while (data.widgets_values.length <= idx) {
               data.widgets_values.push(null);
             }
-            data.widgets_values[idx] = viewStateWidget.value || "{}";
+
+            let viewStateValue = "{}";
+            try {
+              const vs = JSON.parse(viewStateWidget.value || "{}");
+              for (const key of Object.keys(vs)) {
+                if (key.endsWith("_output") && vs[key]) {
+                  const valLen = typeof vs[key] === "string" ? vs[key].length : JSON.stringify(vs[key]).length;
+                  if (valLen > 10000) {
+                    delete vs[key];
+                  }
+                }
+              }
+              viewStateValue = JSON.stringify(vs);
+            } catch {
+              viewStateValue = viewStateWidget.value || "{}";
+            }
+            data.widgets_values[idx] = viewStateValue;
           }
         }
       } catch (e) {

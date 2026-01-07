@@ -1,0 +1,17 @@
+# ComfyUI_Viewer Extensions Folder
+#
+# Place extension .zip files here to auto-install on ComfyUI startup.
+#
+# How to install an extension:
+# 1. Download the extension from GitHub as a .zip file
+# 2. Place the .zip file in this folder
+# 3. Restart ComfyUI
+#
+# The extension will be automatically extracted and its requirements installed.
+# A log file will be created in ./logs/ to track the installation.
+#
+# To reinstall an extension:
+# - Delete its log file from ./logs/ and restart ComfyUI
+#
+# To uninstall an extension:
+# - Delete the .zip file, its log file, and manually remove the extracted files

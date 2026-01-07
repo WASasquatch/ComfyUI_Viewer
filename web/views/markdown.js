@@ -132,8 +132,8 @@ class MarkdownView extends BaseView {
     const codeBlocks = [];
     const PLACEHOLDER = '\x00CODE_BLOCK_';
     
-    // Fenced code blocks (mermaid)
-    html = html.replace(/^```(?:mermaid|flow|flex)(?:\[([^\]]*)\])?\n([\s\S]*?)```$/gm, (_, options, code) => {
+    // Fenced code blocks (mermaid) - allow leading whitespace for indented blocks
+    html = html.replace(/^[ \t]*```(?:mermaid|flow|flex)(?:\[([^\]]*)\])?\n([\s\S]*?)^[ \t]*```$/gm, (_, options, code) => {
       const centered = options && options.toLowerCase().includes('center');
       const style = centered ? 'text-align:center;' : 'text-align:left;';
       const rendered = `<div class="mermaid" style="${style}">${code.trim()}</div>`;
@@ -141,8 +141,8 @@ class MarkdownView extends BaseView {
       return `${PLACEHOLDER}${codeBlocks.length - 1}\x00`;
     });
 
-    // Fenced code blocks (regular)
-    html = html.replace(/^```(\w*)\n([\s\S]*?)```$/gm, (_, lang, code) => {
+    // Fenced code blocks (regular) - allow leading whitespace for indented blocks
+    html = html.replace(/^[ \t]*```(\w*)\n([\s\S]*?)^[ \t]*```$/gm, (_, lang, code) => {
       const rendered = `<pre><code class="language-${lang || "text"}">${escapeHtml(code.trim())}</code></pre>`;
       codeBlocks.push(rendered);
       return `${PLACEHOLDER}${codeBlocks.length - 1}\x00`;
@@ -163,15 +163,19 @@ class MarkdownView extends BaseView {
     html = html.replace(/^(.+)\n=+\s*$/gm, "<h1>$1</h1>");
     html = html.replace(/^(.+)\n-+\s*$/gm, "<h2>$1</h2>");
 
-    html = html.replace(/^######\s*(.+)$/gm, "<h6>$1</h6>");
-    html = html.replace(/^#####\s*(.+)$/gm, "<h5>$1</h5>");
-    html = html.replace(/^####\s*(.+)$/gm, "<h4>$1</h4>");
-    html = html.replace(/^###\s*(.+)$/gm, "<h3>$1</h3>");
-    html = html.replace(/^##\s*(.+)$/gm, "<h2>$1</h2>");
-    html = html.replace(/^#\s*(.+)$/gm, "<h1>$1</h1>");
+    const slugify = (text) => text.toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-');
+    html = html.replace(/^######\s*(.+)$/gm, (_, t) => `<h6 id="${slugify(t)}">${t}</h6>`);
+    html = html.replace(/^#####\s*(.+)$/gm, (_, t) => `<h5 id="${slugify(t)}">${t}</h5>`);
+    html = html.replace(/^####\s*(.+)$/gm, (_, t) => `<h4 id="${slugify(t)}">${t}</h4>`);
+    html = html.replace(/^###\s*(.+)$/gm, (_, t) => `<h3 id="${slugify(t)}">${t}</h3>`);
+    html = html.replace(/^##\s*(.+)$/gm, (_, t) => `<h2 id="${slugify(t)}">${t}</h2>`);
+    html = html.replace(/^#\s*(.+)$/gm, (_, t) => `<h1 id="${slugify(t)}">${t}</h1>`);
 
     html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;">');
-    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, href) => {
+      const target = href.startsWith('#') ? '' : ' target="_blank"';
+      return `<a href="${href}"${target}>${text}</a>`;
+    });
 
     html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
     html = html.replace(/__(.+?)__/g, "<strong>$1</strong>");

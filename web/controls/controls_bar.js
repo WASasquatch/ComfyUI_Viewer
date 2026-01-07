@@ -112,6 +112,47 @@ export function updateViewSelector(selector, content, currentView) {
 }
 
 /**
+ * Create a styled checkbox element
+ * @param {object} theme - Theme tokens
+ * @param {string} label - Checkbox label
+ * @param {string} title - Tooltip
+ * @param {boolean} checked - Initial state
+ * @returns {HTMLLabelElement}
+ */
+function createCheckbox(theme, label, title, checked = false) {
+  const container = document.createElement("label");
+  container.title = title;
+  container.style.cssText = `
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: ${theme.fg};
+    cursor: pointer;
+    font-family: sans-serif;
+    user-select: none;
+  `;
+  
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = checked;
+  checkbox.style.cssText = `
+    margin: 0;
+    cursor: pointer;
+    accent-color: ${theme.accent};
+  `;
+  
+  const text = document.createElement("span");
+  text.textContent = label;
+  
+  container.appendChild(checkbox);
+  container.appendChild(text);
+  container.checkbox = checkbox;
+  
+  return container;
+}
+
+/**
  * Create the controls bar for a viewer node
  * @param {object} node - ComfyUI node
  * @param {object} elements - DOM elements container
@@ -168,15 +209,18 @@ export function createControlsBar(node, elements, callbacks) {
 
   const editBtn = createEditButton(theme, node, elements, callbacks);
   controls.appendChild(editBtn);
+  elements.editBtn = editBtn;
 
   const clearBtn = createClearButton(theme, node, elements, editBtn, callbacks);
   controls.appendChild(clearBtn);
+  elements.clearBtn = clearBtn;
 
   const fullscreenBtn = createFullscreenButton(theme, elements);
   controls.appendChild(fullscreenBtn);
 
   const downloadBtn = createDownloadButton(theme, node, elements, callbacks);
   controls.appendChild(downloadBtn);
+  elements.downloadBtn = downloadBtn;
 
   elements.typeLabel = typeLabel;
   return controls;
@@ -540,6 +584,18 @@ function createDownloadButton(theme, node, elements, callbacks) {
   };
   
   return downloadBtn;
+}
+
+/**
+ * Update controls visibility based on whether the view is a UI
+ * @param {object} elements - DOM elements container with editBtn, clearBtn, downloadBtn
+ * @param {boolean} isUI - Whether the current view is a UI
+ */
+export function updateControlsForUI(elements, isUI) {
+  const display = isUI ? "none" : "";
+  if (elements.editBtn) elements.editBtn.style.display = display;
+  if (elements.clearBtn) elements.clearBtn.style.display = display;
+  if (elements.downloadBtn) elements.downloadBtn.style.display = display;
 }
 
 export { CONTROLS_HEIGHT };

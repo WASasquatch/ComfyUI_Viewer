@@ -20,34 +20,74 @@ _parsers = []
 _loaded = False
 
 
+def _load_parser_from_file(filepath: str, source_name: str = "local"):
+    """Load parser classes from a specific file path."""
+    import importlib.util
+    
+    loaded = []
+    filename = os.path.basename(filepath)
+    module_name = filename[:-3]
+    
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, filepath)
+        if spec is None or spec.loader is None:
+            return loaded
+        
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        
+        for name, obj in inspect.getmembers(module, inspect.isclass):
+            if obj is BaseParser:
+                continue
+            if not issubclass(obj, BaseParser):
+                continue
+            
+            parser_info = {
+                'name': obj.PARSER_NAME,
+                'priority': obj.PARSER_PRIORITY,
+                'class': obj,
+                'detect_input': obj.detect_input,
+                'handle_input': obj.handle_input,
+                'detect_output': obj.detect_output,
+                'parse_output': obj.parse_output,
+            }
+            
+            loaded.append(parser_info)
+            logger.info(f"[Parsers] Loaded parser: {obj.PARSER_NAME} (priority {obj.PARSER_PRIORITY}) from {source_name}")
+        
+    except Exception as e:
+        logger.error(f"[Parsers] Failed to load {filename} from {source_name}: {e}")
+    
+    return loaded
+
+
 def load_parsers():
-    """Load all parser classes from this directory."""
+    """Load all parser classes from this directory and development extensions."""
     global _parsers, _loaded
     
     if _loaded:
         return _parsers
     
     parsers_dir = os.path.dirname(__file__)
-    package_name = __name__  # "modules.parsers" or similar
+    package_name = __name__
     
+    # Load parsers from this directory (installed parsers)
     for filename in os.listdir(parsers_dir):
         if not filename.endswith("_parser.py") or filename == "base_parser.py":
             continue
         
-        module_name = filename[:-3]  # Remove .py
+        module_name = filename[:-3]
         full_module_name = f"{package_name}.{module_name}"
         
         try:
             module = importlib.import_module(full_module_name)
             
-            # Find BaseParser subclasses in the module
             for name, obj in inspect.getmembers(module, inspect.isclass):
                 if obj is BaseParser:
                     continue
                 if not issubclass(obj, BaseParser):
                     continue
                 
-                # Register this parser class
                 parser_info = {
                     'name': obj.PARSER_NAME,
                     'priority': obj.PARSER_PRIORITY,
@@ -64,7 +104,32 @@ def load_parsers():
         except Exception as e:
             logger.error(f"[Parsers] Failed to load {filename}: {e}")
     
-    # Sort by priority (highest first)
+    # Development mode: Load parsers from sibling ComfyUI_Viewer_* extension directories
+    # This allows testing extensions without creating/installing zip files
+    workspace_dir = os.path.dirname(os.path.dirname(os.path.dirname(parsers_dir)))  # Go up to workspace
+    if os.path.isdir(workspace_dir):
+        loaded_names = {p['name'] for p in _parsers}
+        
+        for entry in os.listdir(workspace_dir):
+            if not entry.startswith("ComfyUI_Viewer_"):
+                continue
+            
+            ext_parsers_dir = os.path.join(workspace_dir, entry, "modules", "parsers")
+            if not os.path.isdir(ext_parsers_dir):
+                continue
+            
+            for filename in os.listdir(ext_parsers_dir):
+                if not filename.endswith("_parser.py") or filename == "base_parser.py":
+                    continue
+                
+                filepath = os.path.join(ext_parsers_dir, filename)
+                ext_parsers = _load_parser_from_file(filepath, f"dev:{entry}")
+                
+                for parser_info in ext_parsers:
+                    if parser_info['name'] not in loaded_names:
+                        _parsers.append(parser_info)
+                        loaded_names.add(parser_info['name'])
+    
     _parsers.sort(key=lambda p: p['priority'], reverse=True)
     _loaded = True
     

@@ -7,6 +7,7 @@ import { BaseView, escapeHtml } from "./base_view.js";
 class CanvasView extends BaseView {
   static id = "canvas";
   static displayName = "Canvas";
+  static isUI = true;
   static priority = 95;
 
   static CANVAS_MARKER = "$WAS_CANVAS$";

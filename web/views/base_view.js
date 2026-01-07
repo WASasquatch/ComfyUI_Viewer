@@ -27,6 +27,13 @@ export class BaseView {
   static priority = 0;
 
   /**
+   * Whether this view is a UI (interactive application).
+   * UI views hide Edit/Clear/Download buttons, only showing Fullscreen.
+   * @type {boolean}
+   */
+  static isUI = false;
+
+  /**
    * Scripts loaded state
    * @type {object}
    */

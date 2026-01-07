@@ -1,12 +1,22 @@
-WEB_DIRECTORY = "./web"
+import importlib
+import logging
+import os
+import pkgutil
+import time
+import traceback
+import json
+
+logger = logging.getLogger("WAS.ContentViewer")
 
 
 class AnyType(str):
     def __ne__(self, __value: object) -> bool:
         return False
 
-
 any_type = AnyType("*")
+
+
+WEB_DIRECTORY = "./web"
 
 
 class WASComfyViewer:
@@ -33,11 +43,6 @@ class WASComfyViewer:
     CATEGORY = "WAS/View"
 
     def run(self, content=None, manual_content=None, viewer_meta=None, view_state=None):
-        import json
-        import logging
-        
-        logger = logging.getLogger("WAS.ContentViewer")
-        
         def to_string(item):
             if item is None:
                 return ""
@@ -78,7 +83,8 @@ class WASComfyViewer:
         content_trimmed = [c[:256] if isinstance(c, str) else str(c)[:256] for c in content]
         manual_content_trimmed = [c[:256] if isinstance(c, str) else str(c)[:256] for c in manual_content]
         
-        logger.info(f"\n[WAS Viewer] Content:\n{content_trimmed}\nManual Content:\n{manual_content_trimmed}\nExcluded: {excluded}\n")
+        view_state_trimmed = str(view_state)[:256] if view_state else "None"
+        logger.info(f"\n[WAS Viewer] Content:\n{content_trimmed}\nManual Content:\n{manual_content_trimmed}\nExcluded: {excluded}\nView State: {view_state_trimmed}\n")
         
         LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n"
         
@@ -97,26 +103,49 @@ class WASComfyViewer:
         # Import parser system
         from .modules.parsers import parse_output, handle_all_inputs
         
+        # Compute a hash of the current input content to detect changes
+        import hashlib
+        def compute_input_hash(content_list):
+            """Compute a hash of input content for change detection."""
+            if not content_list:
+                return ""
+            combined = ""
+            for item in content_list:
+                if item is None:
+                    continue
+                item_str = to_string(item)
+                combined += item_str
+            if not combined:
+                return ""
+            return hashlib.md5(combined.encode('utf-8', errors='replace')).hexdigest()
+        
+        current_input_hash = compute_input_hash(content)
+        
         # Check view_state for parser output FIRST
         # Views store output in view_state with keys ending in "_output" (e.g., canvas_output)
+        # BUT only use cached output if input hasn't changed (prevents stale results)
         if has_content(view_state):
             state_str = to_string(view_state[0]) if len(view_state) == 1 else view_state[0]
             try:
                 state_data = json.loads(state_str) if state_str else {}
-                # Check all keys ending with _output for parsable content
-                for key, value in state_data.items():
-                    if key.endswith("_output") and value:
-                        parsed = parse_output(value, logger)
-                        if parsed:
-                            logger.info(f"[WAS Viewer] View state output parsed by: {parsed.get('parser_name', 'unknown')}")
-                            return {
-                                "ui": {
-                                    "text": (parsed["display_text"],),
-                                    "source_content": (parsed["display_text"],),
-                                    "content_hash": (parsed["content_hash"],)
-                                },
-                                "result": (parsed["output_values"],)
-                            }
+                stored_input_hash = state_data.get("_input_hash", "")
+                
+                # Only use cached _output if input content hasn't changed
+                if current_input_hash and stored_input_hash == current_input_hash:
+                    for key, value in state_data.items():
+                        if key.endswith("_output") and value:
+                            parsed = parse_output(value, logger)
+                            if parsed:
+                                return {
+                                    "ui": {
+                                        "text": (parsed["display_text"],),
+                                        "source_content": (parsed["display_text"],),
+                                        "content_hash": (parsed["content_hash"],)
+                                    },
+                                    "result": (parsed["output_values"],)
+                                }
+                elif current_input_hash and stored_input_hash and stored_input_hash != current_input_hash:
+                    logger.info("[WAS Viewer] Input content changed, ignoring cached view_state output")
             except json.JSONDecodeError:
                 pass
         
@@ -157,7 +186,7 @@ class WASComfyViewer:
             content_hash = "empty_0"
             output_values = [""]
         
-        return {"ui": {"text": (display_text,), "source_content": (source_content,), "content_hash": (content_hash,)}, "result": (output_values,)}
+        return {"ui": {"text": (display_text,), "source_content": (source_content,), "content_hash": (content_hash,), "input_hash": (current_input_hash,)}, "result": (output_values,)}
 
 
 class WASCanvasComposeBatch:
@@ -232,3 +261,106 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WASComfyViewer": "Content Viewer",
     "WASCanvasComposeBatch": "CV Canvas Compose Batch",
 }
+
+
+class NodeLoader:
+    """Dynamically loads extension nodes from the ./nodes package."""
+    
+    def __init__(self, package_name: str, prefix: str = "[WAS Viewer] "):
+        self.package_name = package_name
+        self.prefix = prefix
+        self.logger = logging.getLogger("WAS.ContentViewer.NodeLoader")
+        self.timings: dict[str, tuple[float, bool, Exception | None]] = {}
+
+    def module_path(self, module) -> str:
+        spec = getattr(module, "__spec__", None)
+        if spec and getattr(spec, "origin", None):
+            return os.path.basename(spec.origin)
+        return getattr(module, "__file__", repr(module))
+
+    def record(self, module, elapsed: float, ok: bool, err: Exception | None) -> None:
+        self.timings[self.module_path(module)] = (elapsed, ok, err)
+        if ok:
+            NODE_CLASS_MAPPINGS.update(getattr(module, "NODE_CLASS_MAPPINGS", {}))
+            NODE_DISPLAY_NAME_MAPPINGS.update(getattr(module, "NODE_DISPLAY_NAME_MAPPINGS", {}))
+
+    def import_module(self, fullname: str, package: str | None = None) -> tuple[object | None, bool]:
+        t0 = time.time()
+        ok = True
+        err = None
+        mod = None
+        try:
+            mod = importlib.import_module(fullname, package=package)
+        except Exception as e:
+            ok = False
+            err = e
+            self.logger.error(f"{self.prefix}Failed to import {fullname}: {e}")
+        elapsed = time.time() - t0
+        if mod is not None:
+            self.record(mod, elapsed, ok, err)
+        return mod, ok
+
+    def import_file(self, filepath: str, module_name: str) -> tuple[object | None, bool]:
+        """Load a .py file directly by path without requiring package structure."""
+        import importlib.util
+        t0 = time.time()
+        ok = True
+        err = None
+        mod = None
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, filepath)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                import sys
+                sys.modules[module_name] = mod
+                spec.loader.exec_module(mod)
+        except Exception as e:
+            ok = False
+            err = e
+            self.logger.error(f"{self.prefix}Failed to import {filepath}: {e}")
+        elapsed = time.time() - t0
+        if mod is not None:
+            self.record(mod, elapsed, ok, err)
+        return mod, ok
+
+    def load_all(self) -> None:
+        package_path = os.path.dirname(__file__)
+        nodes_path = os.path.join(package_path, "nodes")
+        
+        if not os.path.isdir(nodes_path):
+            return
+        
+        # Load .py files directly from nodes folder (no __init__.py required)
+        for filename in os.listdir(nodes_path):
+            if filename.endswith(".py") and not filename.startswith("_"):
+                filepath = os.path.join(nodes_path, filename)
+                module_name = f"{self.package_name}.nodes.{filename[:-3]}"
+                self.import_file(filepath, module_name)
+        
+        # Walk subpackages if they exist (folders with __init__.py)
+        for item in os.listdir(nodes_path):
+            item_path = os.path.join(nodes_path, item)
+            if os.path.isdir(item_path) and os.path.isfile(os.path.join(item_path, "__init__.py")):
+                subpkg, ok = self.import_module(f".nodes.{item}", package=self.package_name)
+                if ok and subpkg is not None:
+                    for _, name, _ in pkgutil.walk_packages(subpkg.__path__, prefix=subpkg.__name__ + "."):
+                        self.import_module(name)
+        
+        # Log summary
+        if self.timings:
+            total = len(self.timings)
+            ok_count = sum(1 for _, (_, success, _) in self.timings.items() if success)
+            fail_count = total - ok_count
+            ok_modules = ", ".join(p for p, (_, s, _) in self.timings.items() if s)
+            failed_modules = ", ".join(f"{p}: {e}" for p, (_, s, e) in self.timings.items() if not s)
+            if ok_count > 0:
+                self.logger.info(f"{self.prefix}Loaded {ok_count}/{total} nodes: [{ok_modules}]")
+            if fail_count > 0:
+                self.logger.error(f"{self.prefix}Failed {fail_count}/{total} nodes: [{failed_modules}]")
+
+
+_loader = NodeLoader(package_name=__name__, prefix="[WAS Viewer] ")
+_loader.load_all()
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+

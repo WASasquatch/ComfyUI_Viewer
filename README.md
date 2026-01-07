@@ -7,6 +7,20 @@ A powerful, extensible ComfyUI custom node with a modular **Views Extension Syst
 
 ![Screenshot 9](screenshots/screenshot_14.jpg)
 
+## Table of Contents
+
+- [Screenshots](#screenshots)
+- [Features](#features)
+- [Built-in Views](#built-in-views)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Creating Extensions](#creating-extensions)
+- [Troubleshooting](#troubleshooting)
+- [Third-Party Licenses](#third-party-licenses)
+- [License](#license)
+
+# Screenshots
+
 <details>
 <summary><strong>Screenshots</strong></summary>
 
@@ -182,239 +196,22 @@ git clone https://github.com/WASasquatch/ComfyUI_Viewer.git
 
 ---
 
-## How to Add Extensions
+## Creating Extensions
 
-The Content Viewer has a dual extension system: **frontend views** for rendering content in the browser, and **backend parsers** for processing Python objects into displayable data.
+The Content Viewer supports custom view extensions for adding new content types, interactive UIs, and visualizations.
 
-### Extension Architecture Overview
+**📖 See the [Extension Development Guide](extensions/README.md) for complete documentation on:**
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        ComfyUI                              │
-│  ┌─────────────┐     ┌──────────────┐     ┌─────────────┐  │
-│  │ Input Data  │────▶│Backend Parser│────▶│  Frontend   │  │
-│  │ (tensors,   │     │ (Python)     │     │  View (JS)  │  │
-│  │  objects)   │     │              │     │             │  │
-│  └─────────────┘     └──────────────┘     └─────────────┘  │
-│                             │                    │          │
-│                             ▼                    ▼          │
-│                      display_content ──────▶ render()       │
-└─────────────────────────────────────────────────────────────┘
-```
+- Creating extension packages for distribution
+- Adding frontend views (JavaScript)
+- Adding backend parsers (Python)
+- Parser + View integration
+- Troubleshooting
 
-- **Backend Parsers** (`modules/parsers/*_parser.py`) - Process Python objects (tensors, images, custom types) into JSON/strings for the frontend
-- **Frontend Views** (`web/views/*.js`) - Detect content patterns and render HTML in the sandboxed iframe
-
----
-
-## Adding a Frontend View
-
-Frontend views handle content rendering in the browser. They detect content patterns and produce HTML.
-
-### Quick Start
-
-1. **Create your view file** in `web/views/`:
-
-```javascript
-// web/views/myview.js
-import { BaseView, escapeHtml } from "./base_view.js";
-
-class MyView extends BaseView {
-  static id = "myview";           // Unique identifier
-  static displayName = "My View"; // Shown in UI
-  static priority = 50;           // Higher = checked first
-
-  // Return score > 0 if this view should handle the content
-  static detect(content) {
-    if (content.includes("MY_SPECIAL_MARKER")) {
-      return 100; // High confidence
-    }
-    return 0; // Cannot handle
-  }
-
-  // Render content to HTML for the iframe
-  static render(content, theme) {
-    return `<div style="color: ${theme.fg}; background: ${theme.bg};">
-      <h1>My Custom View</h1>
-      <pre>${escapeHtml(content)}</pre>
-    </div>`;
-  }
-
-  // Optional: Add custom CSS
-  static getStyles(theme) {
-    return `
-      body { padding: 16px; }
-      h1 { color: ${theme.accent}; }
-    `;
-  }
-}
-
-export default MyView;
-```
-
-2. **Register in the manifest** - Add your file to `web/views/view_manifest.js`:
-
-```javascript
-export const VIEW_FILES = [
-  "canvas.js",
-  "html.js",
-  // ... existing views ...
-  "myview.js",  // Add your view here
-];
-```
-
-3. **Restart ComfyUI** - Your view will be automatically loaded
-
-### BaseView Interface
-
-All views extend `BaseView` and can override these methods:
-
-| Method | Required | Description |
-|--------|----------|-------------|
-| `static id` | ✓ | Unique string identifier |
-| `static displayName` | ✓ | Human-readable name for UI |
-| `static priority` | ✓ | Detection priority (higher = checked first) |
-| `static detect(content)` | ✓ | Return score (0-100+) for content matching |
-| `static render(content, theme)` | ✓ | Return HTML string for iframe body |
-| `static getStyles(theme)` |  | Return CSS string for iframe |
-| `static getScripts()` |  | Return `<script>` tags for iframe |
-| `static loadScripts(basePath)` |  | Async load external scripts |
-| `static isReady()` |  | Return false if scripts still loading |
-| `static getContentMarker()` |  | Return marker prefix (e.g., `$MY_VIEW$`) |
-| `static getMessageTypes()` |  | Return array of postMessage types to handle |
-| `static handleMessage(type, data, node, app, source)` |  | Handle iframe messages |
-| `static getStateFromWidget(node)` |  | Extract saved state from node |
-| `static injectState(content, state)` |  | Inject state into content before render |
-| `static usesBaseStyles()` |  | Return false to skip base iframe CSS |
-
-### Theme Tokens
-
-The `theme` object passed to `render()` and `getStyles()` contains:
-
-```javascript
-{
-  bg: "#1a1a1a",        // Background color
-  fg: "#cccccc",        // Foreground text color
-  border: "#333333",    // Border color
-  accent: "#4a9eff",    // Accent/link color
-  // ... additional tokens
-}
-```
-
----
-
-## Adding a Backend Parser
-
-Backend parsers process Python objects (tensors, custom types) into content the frontend can display. They are required when:
-
-- Input data is **not a string** (e.g., IMAGE tensors, model objects)
-- You need to **convert Python objects** to JSON/strings for the frontend view
-- Your view needs to **output data back to the workflow** (e.g., Canvas outputs IMAGE tensors)
-
-### Parser Discovery
-
-Parsers are **auto-discovered** from `*_parser.py` files in `modules/parsers/`. Simply create a file ending in `_parser.py` and define a class extending `BaseParser`.
-
-### Minimal Example: Dictionary Parser
-
-This example shows a simple parser that handles Python dictionaries:
-
-```python
-# modules/parsers/dict_parser.py
-"""Minimal parser example - handles Python dictionaries."""
-
-import json
-import hashlib
-from .base_parser import BaseParser
-
-
-class DictParser(BaseParser):
-    """Parser for dictionary input."""
-    
-    PARSER_NAME = "dict"
-    PARSER_PRIORITY = 50
-    OUTPUT_MARKER = "$WAS_DICT$"
-    
-    @classmethod
-    def detect_input(cls, content) -> bool:
-        """Return True if content is a dictionary."""
-        return isinstance(content, dict)
-    
-    @classmethod
-    def handle_input(cls, content, logger=None) -> dict:
-        """Convert dictionary to JSON for frontend display."""
-        json_str = json.dumps(content, indent=2, default=str)
-        content_hash = hashlib.md5(json_str.encode()).hexdigest()[:8]
-        
-        return {
-            "display_content": cls.OUTPUT_MARKER + json_str,
-            "output_values": [content],
-            "content_hash": f"dict_{content_hash}",
-        }
-    
-    @classmethod
-    def detect_output(cls, content: str) -> bool:
-        """Check if content has our marker."""
-        return isinstance(content, str) and content.startswith(cls.OUTPUT_MARKER)
-    
-    @classmethod
-    def parse_output(cls, content: str, logger=None) -> dict:
-        """Parse JSON back to dictionary."""
-        json_str = content[len(cls.OUTPUT_MARKER):]
-        data = json.loads(json_str)
-        
-        return {
-            "output_values": [data],
-            "display_text": f"Dict with {len(data)} keys",
-            "content_hash": f"dict_out_{hash(json_str[:50]) & 0xFFFFFFFF}",
-        }
-```
-
-### BaseParser Interface Reference
-
-| Method | Required | Description |
-|--------|----------|-------------|
-| `PARSER_NAME` | ✓ | Unique string identifier (should match frontend view id) |
-| `PARSER_PRIORITY` | ✓ | Detection priority (higher = checked first) |
-| `OUTPUT_MARKER` |  | String prefix for output content detection |
-| `detect_input(content)` |  | Return `True` if parser handles this input type |
-| `handle_input(content, logger)` |  | Process input, return `{display_content, output_values, content_hash}` |
-| `detect_output(content)` |  | Return `True` if content has this parser's output marker |
-| `parse_output(content, logger)` |  | Convert frontend output to backend types |
-| `detect_state(state_data)` |  | Return `True` if parser handles this state data |
-| `parse_state(state_data, logger)` |  | Parse view state from frontend |
-| `detect_display_content(content)` |  | Return `True` if parser should prepare display content |
-| `prepare_display(content, logger)` |  | Prepare content for display |
-| `get_default_outputs(content, output_types, logger)` |  | Return default output values |
-
-### Parser + View Integration
-
-For a complete extension, you need both a backend parser and frontend view:
-
-1. **Parser** (`modules/parsers/myext_parser.py`):
-   - `detect_input()` → Returns `True` for your data type
-   - `handle_input()` → Converts Python objects to JSON with marker prefix
-   - `parse_output()` → Converts frontend data back to Python types (if needed)
-
-2. **View** (`web/views/myext.js`):
-   - `detect()` → Checks for marker prefix or content pattern
-   - `render()` → Generates HTML from the JSON data
-   - `handleMessage()` → Sends data back to backend (if needed)
-
-**Marker Convention**: Use `$WAS_VIEWNAME$` prefix (e.g., `$WAS_AUDIO$`) so the frontend view can reliably detect content meant for it.
-
-### Multi-View Detection
-
-When multiple parsers return `True` from `detect_input()` for the same content, the system creates a **multi-view payload**:
-
-```python
-# Example: IMAGE tensor detected by both CanvasParser and ObjectParser
-# Result: User sees a view switcher to toggle between Canvas and Object views
-```
-
-This allows users to choose how they want to visualize the data:
-- **Canvas view** for compositing and editing
-- **Object view** for inspecting tensor metrics and statistics
+**Quick install for users:**
+1. Download an extension `.zip` file
+2. Place it in `ComfyUI_Viewer/extensions/`
+3. Restart ComfyUI
 
 ---
 
