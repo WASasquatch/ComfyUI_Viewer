@@ -81,6 +81,12 @@ A powerful, extensible ComfyUI custom node with a modular **Views Extension Syst
 
 ---
 
+## Third-Party Views
+
+| View Name | View Description | View Link |
+|-----------|------------------|-----------|
+| **Image Search** | Search input/output/temp directories for images by input image | [Image Search](https://github.com/WASasquatch/ComfyUI_Viewer_Image_Search_Extension) |
+
 ## Built-in Views
 
 The Content Viewer includes 12 built-in views, listed by detection priority:
