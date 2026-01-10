@@ -217,6 +217,7 @@ export function createControlsBar(node, elements, callbacks) {
 
   const fullscreenBtn = createFullscreenButton(theme, elements);
   controls.appendChild(fullscreenBtn);
+  elements.fullscreenBtn = fullscreenBtn;
 
   const downloadBtn = createDownloadButton(theme, node, elements, callbacks);
   controls.appendChild(downloadBtn);

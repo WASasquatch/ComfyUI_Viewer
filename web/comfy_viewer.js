@@ -16,7 +16,7 @@ import {
   isViewUI
 } from "./views/view_loader.js";
 import { loadPrismScripts } from "./views/code_scripts.js";
-import { computeThemeTokens } from "./utils/theme.js";
+import { computeThemeTokens, getFullTheme, themeToCssVars } from "./utils/theme.js";
 import { createControlsBar, CONTROLS_HEIGHT, updateViewSelector, updateControlsForUI } from "./controls/controls_bar.js";
 import { buildIframeContent, LIST_SEPARATOR } from "./iframe/iframe_builder.js";
 
@@ -36,7 +36,228 @@ const STATE = {
   iframeLoadQueue: [],
   iframeLoading: false,
   hangerCheckIntervalId: null,
+  themeSyncAttached: false,
+  lastThemeCssVars: "",
+  themeUpdatePending: false,
 };
+
+function getThemeCssVars() {
+  try {
+    return themeToCssVars(getFullTheme());
+  } catch (e) {
+    return "";
+  }
+}
+
+function applyThemeToElements(theme, elements) {
+  if (!theme || !elements) return;
+
+  const bindHover = (btn, onEnter, onLeave) => {
+    if (!btn) return;
+    btn.onmouseenter = onEnter;
+    btn.onmouseleave = onLeave;
+  };
+
+  if (elements.controls) {
+    elements.controls.style.background = theme.bg;
+    elements.controls.style.borderBottomColor = theme.border;
+  }
+
+  if (elements.typeLabel) {
+    elements.typeLabel.style.color = theme.fg;
+  }
+
+  if (elements.viewSelector) {
+    elements.viewSelector.style.background = theme.bg;
+    elements.viewSelector.style.color = theme.fg;
+    elements.viewSelector.style.borderColor = theme.border;
+  }
+
+  if (elements.toggleAllBtn) {
+    elements.toggleAllBtn.style.background = theme.bg;
+    elements.toggleAllBtn.style.color = theme.fg;
+    elements.toggleAllBtn.style.borderColor = theme.border;
+
+    bindHover(
+      elements.toggleAllBtn,
+      () => {
+        elements.toggleAllBtn.style.background = theme.accent;
+        elements.toggleAllBtn.style.color = "#fff";
+      },
+      () => {
+        elements.toggleAllBtn.style.background = theme.bg;
+        elements.toggleAllBtn.style.color = theme.fg;
+      }
+    );
+  }
+
+  if (elements.editBtn) {
+    elements.editBtn.style.background = theme.bg;
+    elements.editBtn.style.color = theme.fg;
+    elements.editBtn.style.borderColor = theme.border;
+
+    bindHover(
+      elements.editBtn,
+      () => {
+        elements.editBtn.style.background = theme.accent;
+        elements.editBtn.style.color = "#fff";
+      },
+      () => {
+        elements.editBtn.style.background = theme.bg;
+        elements.editBtn.style.color = theme.fg;
+      }
+    );
+  }
+
+  if (elements.clearBtn) {
+    elements.clearBtn.style.background = theme.bg;
+    elements.clearBtn.style.color = theme.fg;
+    elements.clearBtn.style.borderColor = theme.border;
+
+    bindHover(
+      elements.clearBtn,
+      () => {
+        elements.clearBtn.style.background = "#c44";
+        elements.clearBtn.style.color = "#fff";
+      },
+      () => {
+        elements.clearBtn.style.background = theme.bg;
+        elements.clearBtn.style.color = theme.fg;
+      }
+    );
+  }
+
+  if (elements.fullscreenBtn) {
+    elements.fullscreenBtn.style.background = theme.bg;
+    elements.fullscreenBtn.style.color = theme.fg;
+    elements.fullscreenBtn.style.borderColor = theme.border;
+
+    bindHover(
+      elements.fullscreenBtn,
+      () => {
+        elements.fullscreenBtn.style.background = theme.accent;
+        elements.fullscreenBtn.style.color = "#fff";
+      },
+      () => {
+        elements.fullscreenBtn.style.background = theme.bg;
+        elements.fullscreenBtn.style.color = theme.fg;
+      }
+    );
+  }
+
+  if (elements.downloadBtn) {
+    elements.downloadBtn.style.background = theme.bg;
+    elements.downloadBtn.style.borderColor = theme.border;
+    const path = elements.downloadBtn.querySelector?.("path");
+    if (path) path.setAttribute("fill", theme.fg);
+
+    const updateDownloadSvg = (color) => {
+      const p = elements.downloadBtn.querySelector?.("path");
+      if (p) p.setAttribute("fill", color);
+    };
+
+    bindHover(
+      elements.downloadBtn,
+      () => {
+        elements.downloadBtn.style.background = theme.accent;
+        updateDownloadSvg("#fff");
+      },
+      () => {
+        elements.downloadBtn.style.background = theme.bg;
+        updateDownloadSvg(theme.fg);
+      }
+    );
+  }
+
+  if (elements.wrapper) {
+    elements.wrapper.style.background = theme.bg;
+  }
+
+  if (elements.iframe) {
+    elements.iframe.style.background = theme.bg;
+  }
+
+  if (elements.textarea) {
+    elements.textarea.style.background = theme.bg;
+    elements.textarea.style.color = theme.fg;
+  }
+
+  if (elements.mutedOverlay) {
+    elements.mutedOverlay.style.background = theme.bg;
+  }
+
+  if (elements.lowQualityOverlay) {
+    elements.lowQualityOverlay.style.background = theme.bg;
+  }
+}
+
+function broadcastThemeUpdate() {
+  const cssVars = getThemeCssVars();
+  if (!cssVars || cssVars === STATE.lastThemeCssVars) return;
+  STATE.lastThemeCssVars = cssVars;
+
+  const themeTokens = computeThemeTokens();
+
+  for (const elements of STATE.nodeIdToElements.values()) {
+    try {
+      applyThemeToElements(themeTokens, elements);
+      elements?.iframe?.contentWindow?.postMessage({
+        type: "was-theme-update",
+        cssVars,
+      }, "*");
+    } catch (e) {}
+  }
+}
+
+function scheduleThemeUpdate() {
+  if (STATE.themeUpdatePending) return;
+  STATE.themeUpdatePending = true;
+  window.requestAnimationFrame(() => {
+    STATE.themeUpdatePending = false;
+    broadcastThemeUpdate();
+  });
+}
+
+function ensureThemeSyncRunning() {
+  if (STATE.themeSyncAttached) return;
+  STATE.themeSyncAttached = true;
+
+  // Initialize baseline
+  STATE.lastThemeCssVars = getThemeCssVars();
+
+  const onThemeMaybeChanged = () => scheduleThemeUpdate();
+
+  // Observe attribute changes; ComfyUI theme switching often toggles classes/attributes
+  try {
+    const observer = new MutationObserver(onThemeMaybeChanged);
+    if (document.documentElement) {
+      observer.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["class", "style", "data-theme", "data-color-scheme"],
+      });
+    }
+    if (document.body) {
+      observer.observe(document.body, {
+        attributes: true,
+        attributeFilter: ["class", "style", "data-theme", "data-color-scheme"],
+      });
+    }
+  } catch (e) {}
+
+  // Fallback: periodic check (covers cases where theme changes via stylesheet updates without attribute mutation)
+  window.setInterval(() => {
+    try {
+      const cssVars = getThemeCssVars();
+      if (cssVars && cssVars !== STATE.lastThemeCssVars) {
+        scheduleThemeUpdate();
+      }
+    } catch (e) {}
+  }, 1500);
+
+  // Also update on focus/visibility (covers theme change while tab is backgrounded)
+  window.addEventListener("focus", onThemeMaybeChanged);
+  window.addEventListener("visibilitychange", onThemeMaybeChanged);
+}
 
 function getBasePath() {
   return import.meta.url.substring(0, import.meta.url.lastIndexOf("/"));
@@ -59,6 +280,8 @@ async function initializeViews() {
 
 initializeViews();
 
+ensureThemeSyncRunning();
+
 onViewsRefresh(() => {
   refreshAllViewers();
 });
@@ -75,6 +298,11 @@ function refreshAllViewers() {
       }
     }
   }
+
+  // Also push current theme to any existing iframes.
+  try {
+    broadcastThemeUpdate();
+  } catch (e) {}
 }
 
 function getActiveGraphNodes() {

@@ -222,6 +222,22 @@ export function buildIframeContent(content, contentType, theme, excluded = [], n
     window.WAS_NODE_ID = '${nodeId || ''}';
     window.WAS_SCRIPTS_LOADED = false;
     window.addEventListener('message', function(event) {
+      if (event.data && event.data.type === 'was-theme-update') {
+        try {
+          var cssVars = event.data.cssVars || '';
+          var styleEl = document.getElementById('was-theme-vars');
+          if (!styleEl) {
+            styleEl = document.createElement('style');
+            styleEl.id = 'was-theme-vars';
+            document.head.appendChild(styleEl);
+          }
+          styleEl.textContent = cssVars;
+        } catch (e) {
+          console.error('[WAS Viewer] Theme update error:', e);
+        }
+        return;
+      }
+
       if (event.data && event.data.type === 'was-inject-scripts' && !window.WAS_SCRIPTS_LOADED) {
         window.WAS_SCRIPTS_LOADED = true;
         var scripts = event.data.scripts || [];
