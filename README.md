@@ -88,6 +88,7 @@ A powerful, extensible ComfyUI custom node with a modular **Views Extension Syst
 | View Name | View Description | View Link |
 |-----------|------------------|-----------|
 | **Image Search** | Search input/output/temp directories for images by input image | [Image Search](https://github.com/WASasquatch/ComfyUI_Viewer_Image_Search_Extension) |
+| **OpenReel Video** | Edit videos generated within ComfyUI (e.g., from AnimateDiff, SVD, frame interpolation, etc.) | [OpenReel Video](https://github.com/WASasquatch/ComfyUI_Viewer_OpenReel_Extension) |
 
 ## Built-in Views
 

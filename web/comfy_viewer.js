@@ -13,7 +13,11 @@ import {
   isMultiviewContent,
   parseMultiviewContent,
   getMultiviewContent,
-  isViewUI
+  isViewUI,
+  getViewSandboxAttributes,
+  viewNeedsBlobUrl,
+  getViewDirectUrl,
+  getViewContentMessage
 } from "./views/view_loader.js";
 import { loadPrismScripts } from "./views/code_scripts.js";
 import { computeThemeTokens, getFullTheme, themeToCssVars } from "./utils/theme.js";
@@ -22,6 +26,15 @@ import { buildIframeContent, LIST_SEPARATOR } from "./iframe/iframe_builder.js";
 
 const EXT_NAME = "WAS.ContentViewer";
 const NODE_NAME = "WASComfyViewer";
+
+// Diagnostic v2: fresh key to avoid stale data confusion
+const _diag2 = [];
+function diag(msg) {
+  const ts = performance.now().toFixed(0);
+  _diag2.push(`[${ts}] ${msg}`);
+  try { localStorage.setItem('__was_diag2', JSON.stringify(_diag2.slice(-200))); } catch(e) {}
+}
+
 
 const DEFAULT_NODE_SIZE = [600, 500];
 
@@ -333,6 +346,7 @@ function removeElementsByKey(key) {
   try {
     const elements = STATE.nodeIdToElements.get(key);
     if (!elements) return;
+    diag(`removeElementsByKey: key=${key} directUrlLoaded=${elements?.directUrlLoaded}`);
     elements.wrapper?.remove();
   } catch (e) {
     console.error("[WAS Viewer] removeElementsByKey error:", e);
@@ -344,11 +358,15 @@ function removeElementsByKey(key) {
 function cleanupOrphanElements() {
   try {
     const nodes = getActiveGraphNodes();
-    const activeIds = new Set(
-      nodes
-        .filter((n) => isViewerNode(n))
-        .map((n) => String(n.id))
-    );
+
+    // During hard refresh the graph may not be populated yet.  If we have
+    // tracked elements but the graph reports zero viewer nodes, skip this
+    // cycle — otherwise we'd destroy iframes that will be needed as soon
+    // as the graph finishes loading, causing a create-destroy-create loop.
+    const viewerNodes = nodes.filter((n) => isViewerNode(n));
+    if (viewerNodes.length === 0 && STATE.nodeIdToElements.size > 0) return;
+
+    const activeIds = new Set(viewerNodes.map((n) => String(n.id)));
 
     for (const key of Array.from(STATE.nodeIdToElements.keys())) {
       if (!activeIds.has(key)) {
@@ -543,6 +561,20 @@ function getNodeContent(node, elements) {
   return "";
 }
 
+/**
+ * Check if the upstream node connected to "content" input is a specific
+ * ComfyUI class type (e.g. an OpenReel node). Returns the comfyClass string
+ * of the upstream node, or null if nothing is connected.
+ */
+function getUpstreamNodeClass(node) {
+  const inputLink = node.inputs?.find((i) => i.name === "content")?.link;
+  if (inputLink == null) return null;
+  const link = app.graph.links?.[inputLink];
+  if (!link) return null;
+  const originNode = app.graph.getNodeById(link.origin_id);
+  return originNode?.comfyClass || originNode?.type || null;
+}
+
 function ensureElementsForNode(node) {
   ensureCleanupRunning();
 
@@ -606,7 +638,7 @@ function ensureElementsForNode(node) {
   `;
 
   const iframe = document.createElement("iframe");
-  iframe.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-modals allow-pointer-lock allow-downloads");
+  iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-pointer-lock allow-downloads");
   iframe.setAttribute("allow", "fullscreen");
   iframe.setAttribute("allowfullscreen", "true");
   iframe.style.cssText = `
@@ -793,7 +825,7 @@ function processIframeQueue() {
   if (STATE.iframeLoading || STATE.iframeLoadQueue.length === 0) return;
   
   STATE.iframeLoading = true;
-  const { elements, html, needsBlobUrl, scriptData } = STATE.iframeLoadQueue.shift();
+  const { elements, html, needsBlobUrl, scriptData, directUrl } = STATE.iframeLoadQueue.shift();
   
   if (!elements?.iframe) {
     STATE.iframeLoading = false;
@@ -804,7 +836,7 @@ function processIframeQueue() {
   const onLoad = () => {
     elements.iframe.removeEventListener("load", onLoad);
     
-    if (scriptData && scriptData.length > 0) {
+    if (!directUrl && scriptData && scriptData.length > 0) {
       try {
         elements.iframe.contentWindow.postMessage({
           type: 'was-inject-scripts',
@@ -828,18 +860,33 @@ function processIframeQueue() {
     }
   }, 3000);
   
-  if (needsBlobUrl) {
-    if (elements.lastBlobUrl) {
-      URL.revokeObjectURL(elements.lastBlobUrl);
+  // Clean up any previous blob URL
+  if (elements.lastBlobUrl) {
+    URL.revokeObjectURL(elements.lastBlobUrl);
+    elements.lastBlobUrl = null;
+  }
+  
+  if (directUrl) {
+    // View provides its own URL — load directly via src (no srcdoc/blob wrapper).
+    if (elements.pendingSandbox && elements.iframe.getAttribute("sandbox") !== elements.pendingSandbox) {
+      elements.iframe.setAttribute("sandbox", elements.pendingSandbox);
     }
+    elements.iframe.removeAttribute("srcdoc");
+    diag(`processIframeQueue: setting iframe.src to directUrl`);
+    elements.iframe.src = directUrl;
+  } else if (needsBlobUrl) {
+    if (elements.pendingSandbox && elements.iframe.getAttribute("sandbox") !== elements.pendingSandbox) {
+      elements.iframe.setAttribute("sandbox", elements.pendingSandbox);
+    }
+    elements.lastDirectUrlKey = null;
     const blob = new Blob([html], { type: "text/html" });
     elements.lastBlobUrl = URL.createObjectURL(blob);
     elements.iframe.src = elements.lastBlobUrl;
   } else {
-    if (elements.lastBlobUrl) {
-      URL.revokeObjectURL(elements.lastBlobUrl);
-      elements.lastBlobUrl = null;
+    if (elements.pendingSandbox && elements.iframe.getAttribute("sandbox") !== elements.pendingSandbox) {
+      elements.iframe.setAttribute("sandbox", elements.pendingSandbox);
     }
+    elements.lastDirectUrlKey = null;
     elements.iframe.src = "";
     elements.iframe.srcdoc = html;
   }
@@ -850,8 +897,21 @@ function updateIframeContent(node, elements, forceView = null) {
 
   const content = getNodeContent(node, elements);
   const contentHash = content ? content.length + "_" + content.slice(0, 100) : "";
-  if (contentHash === elements.lastContentHash && !forceView) return;
-  elements.lastContentHash = contentHash;
+
+  // When content is empty but the upstream node is a UI view provider (e.g.
+  // OpenReel), load the view in standalone mode so the user can work in it
+  // before the workflow has been executed.  We use a special hash so this
+  // only runs once (not every frame).
+  let upstreamViewType = null;
+  if (!content) {
+    const upstreamClass = getUpstreamNodeClass(node);
+    if (upstreamClass && upstreamClass.includes("OpenReel")) {
+      upstreamViewType = "openreel_video";
+    }
+  }
+  const effectiveHash = upstreamViewType ? ("_upstream:" + upstreamViewType) : contentHash;
+  if (effectiveHash === elements.lastContentHash && !forceView) return;
+  elements.lastContentHash = effectiveHash;
 
   const theme = computeThemeTokens();
   let displayContent = content;
@@ -878,7 +938,7 @@ function updateIframeContent(node, elements, forceView = null) {
       contentType = detectContentType(content);
     }
   } else {
-    contentType = detectContentType(content);
+    contentType = upstreamViewType || detectContentType(content);
     elements.currentView = null;
     elements.multiviewContent = null;
     if (elements.viewSelector) {
@@ -890,6 +950,12 @@ function updateIframeContent(node, elements, forceView = null) {
     elements.typeLabel.textContent = `Type: ${getViewDisplayName(contentType)}`;
   }
   
+  // Store desired sandbox attrs — applied in processIframeQueue right before
+  // loading new content, so we never change sandbox on an already-loaded iframe
+  // (which would trigger an unwanted browser reload).
+  elements.pendingSandbox = getViewSandboxAttributes(contentType);
+  
+  elements.contentType = contentType;
   updateControlsForUI(elements, isViewUI(contentType));
 
   const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
@@ -924,18 +990,59 @@ function updateIframeContent(node, elements, forceView = null) {
     html = buildIframeContent(finalContent, contentType, theme, excluded, nodeId);
   }
   
-  const needsBlobUrl = displayContent && contentType === "html" && (
-    displayContent.includes("WebAssembly") ||
-    displayContent.includes("wasm") ||
-    displayContent.includes("createUnityInstance") ||
-    displayContent.includes("ServiceWorker") ||
-    displayContent.includes("SharedArrayBuffer")
+  // Check if the view provides a direct URL (e.g. OpenReel app served by its own endpoint).
+  // Pass content even if empty — views like OpenReel can load standalone for manual use.
+  const directUrl = getViewDirectUrl(contentType, finalContent || '', theme);
+
+  // If the view provides a directUrl AND we already loaded it, send content
+  // updates via postMessage instead of reloading the iframe.
+  diag(`updateIframeContent: directUrl=${!!directUrl} directUrlLoaded=${!!elements.directUrlLoaded} nodeId=${String(node.id)} hasContent=${!!displayContent}`);
+  
+  // For OpenReel: defer loading until we have actual content to avoid hard refresh race conditions
+  if (directUrl && !displayContent && !elements.directUrlLoaded) {
+    diag(`updateIframeContent: OpenReel deferred - no content yet`);
+    // Show placeholder, don't load the app yet
+    const placeholderHtml = buildIframeContent("<p style='opacity:0.5;text-align:center;margin-top:40px;'>Waiting for video content...</p>", "html", theme, [], nodeId);
+    elements.iframe.srcdoc = placeholderHtml;
+    elements.lastContentHash = effectiveHash;
+    return;
+  }
+  
+  if (directUrl && elements.directUrlLoaded) {
+    diag(`updateIframeContent: DEDUP`);
+    if (displayContent && elements.iframe?.contentWindow) {
+      const contentMsg = getViewContentMessage(contentType, displayContent);
+      if (contentMsg) {
+        try {
+          elements.iframe.contentWindow.postMessage(contentMsg, '*');
+        } catch (e) {}
+      }
+    }
+    elements.lastContentHash = effectiveHash;
+    return;
+  }
+  
+  const needsBlobUrl = !directUrl && displayContent && (
+    viewNeedsBlobUrl(contentType) ||
+    (contentType === "html" && (
+      displayContent.includes("WebAssembly") ||
+      displayContent.includes("wasm") ||
+      displayContent.includes("createUnityInstance") ||
+      displayContent.includes("ServiceWorker") ||
+      displayContent.includes("SharedArrayBuffer")
+    ))
   );
   
   const scriptData = displayContent ? getViewScriptData(contentType, finalContent) : [];
-  
+
+  // Mark that a directUrl load has been queued.
+  if (directUrl) {
+    diag(`updateIframeContent: queuing directUrl load`);
+    elements.directUrlLoaded = true;
+  }
+
   STATE.iframeLoadQueue = STATE.iframeLoadQueue.filter(item => item.elements !== elements);
-  STATE.iframeLoadQueue.push({ elements, html, needsBlobUrl, scriptData });
+  STATE.iframeLoadQueue.push({ elements, html, needsBlobUrl, scriptData, directUrl });
   processIframeQueue();
 }
 
@@ -975,6 +1082,27 @@ window.addEventListener("message", (event) => {
         }
         metaWidget.value = JSON.stringify(meta);
         node.setDirtyCanvas?.(true, true);
+      }
+    }
+  } else if (event.data?.type === "openreel-ready") {
+    // The OpenReel app inside the iframe is ready to receive content.
+    // Re-send the current content so video gets imported even if the
+    // earlier postMessage arrived before the React listener was active.
+    for (const [nId, elements] of STATE.nodeIdToElements.entries()) {
+      if (elements.iframe && elements.iframe.contentWindow === event.source) {
+        const node = app.graph?.getNodeById(parseInt(nId));
+        if (node && elements.contentType) {
+          const content = getNodeContent(node, elements);
+          if (content) {
+            const contentMsg = getViewContentMessage(elements.contentType, content);
+            if (contentMsg) {
+              try {
+                elements.iframe.contentWindow.postMessage(contentMsg, '*');
+              } catch (e) {}
+            }
+          }
+        }
+        break;
       }
     }
   } else {

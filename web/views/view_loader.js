@@ -253,6 +253,74 @@ export function isViewUI(contentType) {
 }
 
 /**
+ * Default sandbox attributes for the Content Viewer iframe.
+ */
+const DEFAULT_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals allow-pointer-lock allow-downloads";
+
+/**
+ * Get sandbox attributes for the Content Viewer iframe based on the current view.
+ * Views can declare additional sandbox permissions via a static getSandboxAttributes() method.
+ * @param {string} contentType 
+ * @returns {string} sandbox attribute value
+ */
+export function getViewSandboxAttributes(contentType) {
+  const view = VIEW_REGISTRY.get(contentType);
+  if (view && typeof view.getSandboxAttributes === 'function') {
+    return view.getSandboxAttributes();
+  }
+  return DEFAULT_SANDBOX;
+}
+
+/**
+ * Check if a view requires a blob URL instead of srcdoc for the outer iframe.
+ * Views that need same-origin access (e.g. to make fetch calls to ComfyUI API)
+ * must use blob URLs because srcdoc iframes always have a null origin.
+ * @param {string} contentType 
+ * @returns {boolean}
+ */
+export function viewNeedsBlobUrl(contentType) {
+  const view = VIEW_REGISTRY.get(contentType);
+  if (view && typeof view.needsBlobUrl === 'function') {
+    return view.needsBlobUrl();
+  }
+  return false;
+}
+
+/**
+ * Get a direct URL for the outer Content Viewer iframe.
+ * Views that serve their own app (e.g. OpenReel) can provide a URL so the
+ * outer iframe loads it via src= instead of building HTML with srcdoc/blob.
+ * This avoids nested iframe issues entirely.
+ * @param {string} contentType 
+ * @param {string} content - The raw display content (may contain JSON data)
+ * @param {object} theme - Theme tokens
+ * @returns {string|null} - URL to load, or null to use normal rendering
+ */
+export function getViewDirectUrl(contentType, content, theme) {
+  const view = VIEW_REGISTRY.get(contentType);
+  if (view && typeof view.getDirectUrl === 'function') {
+    return view.getDirectUrl(content, theme);
+  }
+  return null;
+}
+
+/**
+ * Build a postMessage payload for sending updated content to an already-loaded
+ * directUrl iframe.  Views that support this can update their content without
+ * a full iframe reload.
+ * @param {string} contentType
+ * @param {string} content - The raw display content
+ * @returns {object|null} - Message object to postMessage, or null if unsupported
+ */
+export function getViewContentMessage(contentType, content) {
+  const view = VIEW_REGISTRY.get(contentType);
+  if (view && typeof view.getContentMessage === 'function') {
+    return view.getContentMessage(content);
+  }
+  return null;
+}
+
+/**
  * Get display name for a view type
  * @param {string} contentType 
  * @returns {string}

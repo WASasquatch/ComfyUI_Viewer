@@ -13,6 +13,8 @@ This guide covers how to create view extensions for ComfyUI_Viewer. Extensions c
   - [Complete Extension Example](#complete-extension-example)
   - [View Manifest Registration](#view-manifest-registration)
   - [Extension Architecture Overview](#extension-architecture-overview)
+
+### Simple Frontend Views (JavaScript + Parser)
 - [Adding a Frontend View](#adding-a-frontend-view)
   - [Quick Start](#quick-start)
   - [BaseView Interface](#baseview-interface)
@@ -24,6 +26,20 @@ This guide covers how to create view extensions for ComfyUI_Viewer. Extensions c
   - [BaseParser Interface Reference](#baseparser-interface-reference)
   - [Parser + View Integration](#parser--view-integration)
   - [Multi-View Detection](#multi-view-detection)
+
+### Embedded Web Applications (Full React/Vue/Svelte Apps)
+- [Embedding Full Web Applications](#embedding-full-web-applications)
+  - [Architecture Overview](#architecture-overview)
+  - [API Route Registration](#1-api-route-registration-python)
+  - [Frontend View Wrapper](#2-frontend-view-javascript)
+  - [PostMessage Communication](#3-communication-pattern-postmessage)
+  - [Theme Integration](#4-theme-integration)
+  - [Parser Integration](#5-parser-integration)
+  - [Complete Example: OpenReel](#complete-example-openreel-extension)
+  - [Best Practices](#best-practices)
+  - [Deployment](#deployment)
+
+### General
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -534,6 +550,491 @@ When multiple parsers return `True` from `detect_input()` for the same content, 
 This allows users to choose how they want to visualize the data:
 - **Canvas view** for compositing and editing
 - **Object view** for inspecting tensor metrics and statistics
+
+---
+
+## Embedding Full Web Applications
+
+For complex interactive tools that require a full web framework (React, Vue, Svelte, etc.), you can serve a complete web application from your extension using the `/app` functionality. This approach allows you to embed sophisticated applications (video editors, image galleries, drawing tools, etc.) directly into ComfyUI_Viewer.
+
+### Architecture Overview
+
+```
+Extension Package/
+├── apps/
+│   └── my_app/              # Built web app (HTML/JS/CSS)
+│       ├── index.html
+│       ├── assets/
+│       │   ├── index-abc123.js
+│       │   └── index-def456.css
+│       └── ...
+├── routes/
+│   └── my_app_routes.py     # API routes to serve the app
+├── nodes/
+│   └── my_app_nodes.py      # ComfyUI nodes (optional)
+├── modules/
+│   └── parsers/
+│       └── my_app_parser.py # Handles input/output data flow
+└── web/
+    └── views/
+        └── my_app.js        # Minimal view that creates iframe
+```
+
+### Key Components
+
+#### 1. API Route Registration (Python)
+
+Create a routes file to register API endpoints for serving your built app:
+
+```python
+# routes/my_app_routes.py
+from aiohttp import web
+from server import PromptServer
+import os
+import mimetypes
+import logging
+
+logger = logging.getLogger("WAS.MyApp.Routes")
+
+def _get_my_app_dir():
+    """Get path to the built app static files."""
+    return os.path.join(os.path.dirname(__file__), "..", "apps", "my_app")
+
+@PromptServer.instance.routes.get('/was/my_app/app/{path:.*}')
+async def serve_my_app(request):
+    """Serve the built app static files."""
+    path = request.match_info.get('path', 'index.html')
+    if not path:
+        path = 'index.html'
+    
+    app_dir = _get_my_app_dir()
+    file_path = os.path.join(app_dir, path)
+    
+    # Security: Prevent path traversal
+    real_app_dir = os.path.realpath(app_dir)
+    real_file_path = os.path.realpath(file_path)
+    if not real_file_path.startswith(real_app_dir):
+        return web.json_response({'error': 'Access denied'}, status=403)
+    
+    if not os.path.exists(real_file_path) or not os.path.isfile(real_file_path):
+        return web.json_response({'error': 'File not found'}, status=404)
+    
+    # Determine content type
+    content_type, _ = mimetypes.guess_type(real_file_path)
+    if content_type is None:
+        content_type = 'application/octet-stream'
+    
+    # Ensure correct MIME types for web assets
+    if real_file_path.endswith('.js'):
+        content_type = 'application/javascript'
+    elif real_file_path.endswith('.css'):
+        content_type = 'text/css'
+    
+    with open(real_file_path, 'rb') as f:
+        data = f.read()
+    
+    return web.Response(
+        body=data,
+        content_type=content_type,
+        headers={'Content-Length': str(len(data))}
+    )
+
+logger.info("[My App] API routes registered")
+```
+
+**Important Notes:**
+- Routes are automatically discovered and loaded from the `routes/` directory at ComfyUI startup
+- The `routes/` directory is separate from `nodes/` to keep API endpoints organized
+- `nodes/` is only for ComfyUI nodes that appear in the graph
+
+If your app uses a bundler (Vite, Webpack, etc.), configure the **base path** to match your API route:
+
+```javascript
+// vite.config.ts
+export default {
+  base: '/was/my_app/app/',  // Must match your API route
+  // ...
+}
+```
+
+This ensures all asset paths (JS, CSS, images) resolve correctly when served from ComfyUI.
+
+#### 2. Frontend View (JavaScript)
+
+Create a minimal view that embeds your app in an iframe:
+
+```javascript
+// web/views/my_app.js
+import { BaseView } from "./base_view.js";
+
+class MyAppView extends BaseView {
+  static id = "my_app";
+  static displayName = "My App";
+  static priority = 100;
+  static isUI = true;  // Hide Edit/Clear/Download buttons
+  
+  static INPUT_MARKER = "$WAS_MY_APP$";
+  static OUTPUT_MARKER = "$WAS_MY_APP_OUTPUT$";
+
+  static detect(content) {
+    if (typeof content === "string" && content.startsWith(this.INPUT_MARKER)) {
+      return 100;
+    }
+    return 0;
+  }
+
+  static getContentMarker() {
+    return this.INPUT_MARKER;
+  }
+
+  /**
+   * Build the app URL with embedding params and theme
+   */
+  static _buildAppUrl(theme) {
+    const origin = window.location.origin;
+    const params = new URLSearchParams({ embedded: 'true' });
+    
+    // Pass ComfyUI theme to the app
+    if (theme) {
+      if (theme.bg) params.set('theme_bg', theme.bg);
+      if (theme.fg) params.set('theme_fg', theme.fg);
+      if (theme.accent) params.set('theme_accent', theme.accent);
+      // ... add more theme tokens as needed
+    }
+    
+    return `${origin}/was/my_app/app/index.html?${params.toString()}`;
+  }
+
+  static render(content, theme) {
+    const appUrl = this._buildAppUrl(theme);
+    
+    return `
+      <div style="width: 100%; height: 100%; position: relative;">
+        <iframe
+          id="my-app-iframe"
+          src="${appUrl}"
+          style="width: 100%; height: 100%; border: none;"
+          allow="clipboard-write"
+        ></iframe>
+      </div>
+    `;
+  }
+
+  static usesBaseStyles() {
+    return false;  // App provides its own styles
+  }
+
+  /**
+   * Handle messages from the embedded app
+   */
+  static getMessageTypes() {
+    return ["my-app-output"];
+  }
+
+  static handleMessage(messageType, data, node, app, iframeSource) {
+    if (messageType !== "my-app-output") return false;
+
+    const outputString = this.OUTPUT_MARKER + JSON.stringify(data);
+    
+    const viewStateWidget = node.widgets?.find(w => w.name === "view_state");
+    if (viewStateWidget) {
+      const viewState = JSON.parse(viewStateWidget.value || "{}");
+      viewState.my_app_output = outputString;
+      viewStateWidget.value = JSON.stringify(viewState);
+      node.setDirtyCanvas?.(true, true);
+      return true;
+    }
+    return false;
+  }
+}
+
+export default MyAppView;
+```
+
+#### 3. Communication Pattern (PostMessage)
+
+Your embedded app communicates with ComfyUI using the PostMessage API:
+
+**Sending data to ComfyUI:**
+```javascript
+// Inside your React/Vue/etc app
+window.parent.postMessage({
+  type: 'my-app-output',
+  data: { result: 'some data' }
+}, '*');
+```
+
+**Receiving data from ComfyUI:**
+```javascript
+// Inside your React/Vue/etc app
+useEffect(() => {
+  const handleMessage = (event: MessageEvent) => {
+    if (event.data.type === 'comfyui-import-data') {
+      // Handle data from ComfyUI workflow
+      const data = event.data.data;
+      // Update your app state...
+    }
+  };
+  
+  window.addEventListener('message', handleMessage);
+  return () => window.removeEventListener('message', handleMessage);
+}, []);
+
+// Notify parent that app is ready
+useEffect(() => {
+  if (window.parent !== window) {
+    window.parent.postMessage({ type: 'my-app-ready' }, '*');
+  }
+}, []);
+```
+
+#### 4. Theme Integration
+
+To match ComfyUI's theme, parse the URL parameters in your app:
+
+```javascript
+// Inside your React/Vue/etc app
+const params = new URLSearchParams(window.location.search);
+const isEmbedded = params.get('embedded') === 'true';
+
+if (isEmbedded) {
+  // Apply ComfyUI theme
+  const themeBg = params.get('theme_bg') || '#1a1a1a';
+  const themeFg = params.get('theme_fg') || '#cccccc';
+  const themeAccent = params.get('theme_accent') || '#4a9eff';
+  
+  // Set CSS variables or update your theme store
+  document.documentElement.style.setProperty('--bg-color', themeBg);
+  document.documentElement.style.setProperty('--text-color', themeFg);
+  document.documentElement.style.setProperty('--accent-color', themeAccent);
+}
+```
+
+#### 5. Parser Integration
+
+Your parser handles the data flow between ComfyUI nodes and your app:
+
+```python
+# modules/parsers/my_app_parser.py
+import json
+from .base_parser import BaseParser
+
+class MyAppParser(BaseParser):
+    PARSER_NAME = "my_app"
+    PARSER_PRIORITY = 100
+    INPUT_MARKER = "$WAS_MY_APP$"
+    OUTPUT_MARKER = "$WAS_MY_APP_OUTPUT$"
+    
+    @classmethod
+    def detect_input(cls, content) -> bool:
+        # Detect your input data type
+        return isinstance(content, str) and content.startswith("MY_APP_DATA:")
+    
+    @classmethod
+    def handle_input(cls, content, logger=None) -> dict:
+        # Prepare data for the app
+        data = {"input": content}
+        return {
+            "display_content": cls.INPUT_MARKER + json.dumps(data),
+            "output_values": [content],
+            "content_hash": f"my_app_{hash(content) & 0xFFFFFFFF}",
+        }
+    
+    @classmethod
+    def detect_output(cls, content: str) -> bool:
+        return isinstance(content, str) and content.startswith(cls.OUTPUT_MARKER)
+    
+    @classmethod
+    def parse_output(cls, content: str, logger=None) -> dict:
+        # Parse output from the app
+        json_str = content[len(cls.OUTPUT_MARKER):]
+        data = json.loads(json_str)
+        result = data.get("result", "")
+        
+        return {
+            "output_values": [result],
+            "display_text": f"Result: {result}",
+            "content_hash": f"my_app_out_{hash(result) & 0xFFFFFFFF}",
+        }
+```
+
+### Complete Workflow: Building and Deploying Your App
+
+#### Step 1: Develop Your Web Application
+
+Build your application using your preferred framework (React, Vue, Svelte, etc.):
+
+```bash
+# Example with Vite + React
+npm create vite@latest my-app -- --template react
+cd my-app
+npm install
+
+# Configure base path in vite.config.ts
+export default {
+  base: '/was/my_app/app/',  // Must match your API route
+  build: {
+    outDir: 'dist',
+    assetsDir: 'assets',
+  }
+}
+
+# Build for production
+npm run build
+```
+
+Your `dist/` folder will contain:
+```
+dist/
+├── index.html
+├── assets/
+│   ├── index-abc123.js
+│   ├── index-def456.css
+│   └── ...
+└── ...
+```
+
+#### Step 2: Create Your Extension Package
+
+Create the extension folder structure:
+
+```
+ComfyUI_Viewer_MyApp_Extension/
+├── apps/
+│   └── my_app/              # Copy your built app here
+│       ├── index.html
+│       └── assets/
+├── nodes/
+│   └── my_app_nodes.py      # API routes + ComfyUI nodes
+├── modules/
+│   └── parsers/
+│       └── my_app_parser.py # Input/output handling
+├── web/
+│   └── views/
+│       └── my_app.js        # Iframe wrapper view
+└── README.md
+```
+
+**Copy your built app:**
+```bash
+cp -r my-app/dist/* ComfyUI_Viewer_MyApp_Extension/apps/my_app/
+```
+
+#### Step 3: Create ComfyUI Nodes (Optional)
+
+Add custom nodes to generate input data for your app:
+
+```python
+# nodes/my_app_nodes.py
+from aiohttp import web
+from server import PromptServer
+import os
+import mimetypes
+
+# ... (API route code from section 1 above)
+
+# Optional: Add ComfyUI nodes
+class MyAppInputNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "data": ("STRING", {"default": ""}),
+            }
+        }
+    
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "process"
+    CATEGORY = "WAS/View"
+    
+    def process(self, data):
+        # Prepare data for your app
+        return (f"MY_APP_DATA:{data}",)
+
+NODE_CLASS_MAPPINGS = {
+    "CV My App Input": MyAppInputNode,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "CV My App Input": "CV My App Input",
+}
+```
+
+#### Step 4: Test Locally
+
+1. **Copy extension to ComfyUI:**
+   ```bash
+   cp -r ComfyUI_Viewer_MyApp_Extension ComfyUI/custom_nodes/ComfyUI_Viewer/extensions/
+   ```
+
+2. **Restart ComfyUI** - The extension installer will:
+   - Copy files to correct locations
+   - Register your nodes
+   - Make your app available at `/was/my_app/app/`
+
+3. **Test in workflow:**
+   - Add your input node (if created)
+   - Connect to Content Viewer
+   - Run workflow - your app should load in the viewer
+
+#### Step 5: Package for Distribution
+
+Create a GitHub repository with your extension:
+
+```bash
+cd ComfyUI_Viewer_MyApp_Extension
+git init
+git add .
+git commit -m "Initial commit"
+git remote add origin https://github.com/YourUsername/ComfyUI_Viewer_MyApp_Extension
+git push -u origin main
+```
+
+**Users install by:**
+1. Downloading ZIP from GitHub
+2. Placing in `ComfyUI/custom_nodes/ComfyUI_Viewer/extensions/`
+3. Restarting ComfyUI
+
+#### Step 6: Update Your App
+
+When you update your app:
+
+```bash
+# Rebuild your app
+cd my-app
+npm run build
+
+# Copy to extension
+cp -r dist/* ../ComfyUI_Viewer_MyApp_Extension/apps/my_app/
+
+# Commit and push
+cd ../ComfyUI_Viewer_MyApp_Extension
+git add apps/my_app/
+git commit -m "Update app to v1.1"
+git push
+```
+
+Users get updates by re-downloading the ZIP and replacing their installation.
+
+### Best Practices
+
+1. **Security**: Always validate and sanitize paths in API routes to prevent path traversal attacks
+2. **MIME Types**: Ensure correct Content-Type headers for JS/CSS/WASM files
+3. **Base Path**: Configure your bundler's base path to match your API route
+4. **Theme Sync**: Pass ComfyUI theme via URL params for seamless integration
+5. **Embedded Detection**: Use `?embedded=true` to conditionally show/hide UI elements
+6. **PostMessage**: Use typed messages with clear naming conventions (e.g., `my-app-output`)
+7. **State Persistence**: Store output in `view_state` widget for workflow persistence
+8. **Error Handling**: Gracefully handle iframe load failures and communication errors
+
+### Deployment
+
+When distributing your extension:
+
+1. **Build your app** using your bundler (Vite, Webpack, etc.)
+2. **Copy built files** to `apps/my_app/` in your extension package
+3. **Include in zip** - Users download and extract to `ComfyUI_Viewer/extensions/`
+4. **Auto-install** - Extension installer copies files to correct locations
 
 ---
 
