@@ -5,7 +5,7 @@
 
 import { computeThemeTokens } from "../utils/theme.js";
 import { createZipBlob } from "../utils/zip.js";
-import { detectContentType, isMultiviewContent, getMultiviewOptions, parseMultiviewContent, stripContentMarker } from "../views/view_loader.js";
+import { detectContentType, isMultiviewContent, getMultiviewOptions, parseMultiviewContent, stripContentMarker, getAllViews } from "../views/view_loader.js";
 
 const CONTROLS_HEIGHT = 32;
 const LIST_SEPARATOR = "\n---LIST_SEPARATOR---\n";
@@ -80,35 +80,77 @@ function createViewSelector(theme, node, elements, callbacks) {
  * @param {string} content - Content to check for multi-view
  * @param {string} currentView - Currently selected view name
  */
-export function updateViewSelector(selector, content, currentView) {
+export async function updateViewSelector(selector, content, currentView) {
   if (!selector) return;
   
-  if (!isMultiviewContent(content)) {
-    selector.style.display = "none";
-    selector.innerHTML = "";
-    return;
-  }
-  
-  const options = getMultiviewOptions(content);
-  if (options.length <= 1) {
-    selector.style.display = "none";
-    selector.innerHTML = "";
-    return;
-  }
-  
-  // Build options
-  selector.innerHTML = "";
-  for (const opt of options) {
-    const option = document.createElement("option");
-    option.value = opt.name;
-    option.textContent = opt.displayName;
-    if (opt.name === currentView) {
-      option.selected = true;
+  // For multi-view content, show the multi-view selector
+  if (isMultiviewContent(content)) {
+    const options = getMultiviewOptions(content);
+    if (options.length <= 1) {
+      selector.style.display = "none";
+      selector.innerHTML = "";
+      return;
     }
-    selector.appendChild(option);
+    
+    // Build multi-view options
+    selector.innerHTML = "";
+    for (const opt of options) {
+      const option = document.createElement("option");
+      option.value = opt.name;
+      option.textContent = opt.displayName;
+      if (opt.name === currentView) {
+        option.selected = true;
+      }
+      selector.appendChild(option);
+    }
+    
+    selector.style.display = "inline-block";
+    return;
   }
   
-  selector.style.display = "inline-block";
+  // For empty content, show all available views for manual selection
+  if (!content || content.trim() === "") {
+    const { loadAllViews } = await import("../views/view_loader.js");
+    await loadAllViews();
+    
+    const allViews = getAllViews();
+    
+    if (allViews.size === 0) {
+      selector.style.display = "none";
+      selector.innerHTML = "";
+      return;
+    }
+    
+    // Build options from all registered views
+    selector.innerHTML = "";
+    
+    // Add "Auto" option as default
+    const autoOption = document.createElement("option");
+    autoOption.value = "";
+    autoOption.textContent = "Auto";
+    if (!currentView) {
+      autoOption.selected = true;
+    }
+    selector.appendChild(autoOption);
+    
+    // Add all registered views
+    for (const [id, view] of allViews) {
+      const option = document.createElement("option");
+      option.value = id;
+      option.textContent = view.displayName || id;
+      if (id === currentView) {
+        option.selected = true;
+      }
+      selector.appendChild(option);
+    }
+    
+    selector.style.display = "inline-block";
+    return;
+  }
+  
+  // For normal content with a view, hide the selector
+  selector.style.display = "none";
+  selector.innerHTML = "";
 }
 
 /**

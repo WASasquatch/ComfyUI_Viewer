@@ -608,7 +608,7 @@ function ensureElementsForNode(node) {
     textarea: null,
     typeLabel: null,
     toggleAllBtn: null,
-    lastContentHash: "",
+    lastContentHash: null,
     isEditing: false,
     listEditContainer: null,
     listTextareas: null,
@@ -896,20 +896,26 @@ function updateIframeContent(node, elements, forceView = null) {
   if (elements.isEditing) return;
 
   const content = getNodeContent(node, elements);
-  const contentHash = content ? content.length + "_" + content.slice(0, 100) : "";
+  const contentHash = content ? content.length + "_" + content.slice(0, 100) : "__empty__";
+
+  // Check for manual view selection from the toolbar dropdown
+  let manualViewType = null;
+  if (!content && elements.viewSelector && elements.viewSelector.value) {
+    manualViewType = elements.viewSelector.value;
+  }
 
   // When content is empty but the upstream node is a UI view provider (e.g.
   // OpenReel), load the view in standalone mode so the user can work in it
   // before the workflow has been executed.  We use a special hash so this
   // only runs once (not every frame).
   let upstreamViewType = null;
-  if (!content) {
+  if (!content && !manualViewType) {
     const upstreamClass = getUpstreamNodeClass(node);
     if (upstreamClass && upstreamClass.includes("OpenReel")) {
       upstreamViewType = "openreel_video";
     }
   }
-  const effectiveHash = upstreamViewType ? ("_upstream:" + upstreamViewType) : contentHash;
+  const effectiveHash = (manualViewType || upstreamViewType) ? ("_manual:" + (manualViewType || upstreamViewType)) : contentHash;
   if (effectiveHash === elements.lastContentHash && !forceView) return;
   elements.lastContentHash = effectiveHash;
 
@@ -938,11 +944,19 @@ function updateIframeContent(node, elements, forceView = null) {
       contentType = detectContentType(content);
     }
   } else {
-    contentType = upstreamViewType || detectContentType(content);
-    elements.currentView = null;
+    // Manual view_type only applies when there's no content (standalone mode)
+    // When content exists, always use normal detection
+    if (!content && manualViewType) {
+      contentType = manualViewType;
+    } else {
+      contentType = upstreamViewType || detectContentType(content);
+    }
+    elements.currentView = manualViewType || null;
     elements.multiviewContent = null;
+    
+    // Update view selector for empty content (shows all views)
     if (elements.viewSelector) {
-      elements.viewSelector.style.display = "none";
+      updateViewSelector(elements.viewSelector, content, manualViewType);
     }
   }
   
@@ -984,10 +998,10 @@ function updateIframeContent(node, elements, forceView = null) {
 
   let html;
   const nodeId = String(node.id);
-  if (!displayContent) {
+  if (!displayContent && !manualViewType) {
     html = buildIframeContent("<p style='opacity:0.5;text-align:center;margin-top:40px;'>No content. Click Edit to add content or connect a STRING input.</p>", "html", theme, [], nodeId);
   } else {
-    html = buildIframeContent(finalContent, contentType, theme, excluded, nodeId);
+    html = buildIframeContent(finalContent || '', contentType, theme, excluded, nodeId);
   }
   
   // Check if the view provides a direct URL (e.g. OpenReel app served by its own endpoint).
@@ -999,7 +1013,7 @@ function updateIframeContent(node, elements, forceView = null) {
   diag(`updateIframeContent: directUrl=${!!directUrl} directUrlLoaded=${!!elements.directUrlLoaded} nodeId=${String(node.id)} hasContent=${!!displayContent}`);
   
   // For OpenReel: defer loading until we have actual content to avoid hard refresh race conditions
-  if (directUrl && !displayContent && !elements.directUrlLoaded) {
+  if (directUrl && !displayContent && !elements.directUrlLoaded && !manualViewType) {
     diag(`updateIframeContent: OpenReel deferred - no content yet`);
     // Show placeholder, don't load the app yet
     const placeholderHtml = buildIframeContent("<p style='opacity:0.5;text-align:center;margin-top:40px;'>Waiting for video content...</p>", "html", theme, [], nodeId);
@@ -1022,9 +1036,9 @@ function updateIframeContent(node, elements, forceView = null) {
     return;
   }
   
-  const needsBlobUrl = !directUrl && displayContent && (
+  const needsBlobUrl = !directUrl && (displayContent || manualViewType) && (
     viewNeedsBlobUrl(contentType) ||
-    (contentType === "html" && (
+    (contentType === "html" && displayContent && (
       displayContent.includes("WebAssembly") ||
       displayContent.includes("wasm") ||
       displayContent.includes("createUnityInstance") ||
@@ -1033,7 +1047,7 @@ function updateIframeContent(node, elements, forceView = null) {
     ))
   );
   
-  const scriptData = displayContent ? getViewScriptData(contentType, finalContent) : [];
+  const scriptData = (displayContent || manualViewType) ? getViewScriptData(contentType, finalContent || '') : [];
 
   // Mark that a directUrl load has been queued.
   if (directUrl) {
@@ -1053,9 +1067,15 @@ function updateIframeContent(node, elements, forceView = null) {
  * @param {string} viewName - Name of view to switch to
  */
 function handleViewChange(node, elements, viewName) {
-  if (!elements.multiviewContent) return;
+  if (elements.multiviewContent) {
+    elements.lastContentHash = "";
+    updateIframeContent(node, elements, viewName);
+    return;
+  }
+  // Manual view selection on empty nodes
   elements.lastContentHash = "";
-  updateIframeContent(node, elements, viewName);
+  elements.directUrlLoaded = false;
+  updateIframeContent(node, elements);
 }
 
 window.addEventListener("message", (event) => {
