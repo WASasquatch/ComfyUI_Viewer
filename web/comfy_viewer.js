@@ -640,7 +640,6 @@ function ensureElementsForNode(node) {
   const iframe = document.createElement("iframe");
   iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-pointer-lock allow-downloads");
   iframe.setAttribute("allow", "fullscreen");
-  iframe.setAttribute("allowfullscreen", "true");
   iframe.style.cssText = `
     position: absolute;
     top: 0;
@@ -881,6 +880,7 @@ function processIframeQueue() {
     elements.lastDirectUrlKey = null;
     const blob = new Blob([html], { type: "text/html" });
     elements.lastBlobUrl = URL.createObjectURL(blob);
+    elements.iframe.removeAttribute("srcdoc");
     elements.iframe.src = elements.lastBlobUrl;
   } else {
     if (elements.pendingSandbox && elements.iframe.getAttribute("sandbox") !== elements.pendingSandbox) {
@@ -902,6 +902,19 @@ function updateIframeContent(node, elements, forceView = null) {
   let manualViewType = null;
   if (!content && elements.viewSelector && elements.viewSelector.value) {
     manualViewType = elements.viewSelector.value;
+  }
+
+  // Restore persisted view selection from view_state on reload
+  if (!content && !manualViewType) {
+    const vsWidget = node.widgets?.find(w => w.name === "view_state");
+    if (vsWidget) {
+      try {
+        const vs = JSON.parse(vsWidget.value || "{}");
+        if (vs._selectedView) {
+          manualViewType = vs._selectedView;
+        }
+      } catch {}
+    }
   }
 
   // When content is empty but the upstream node is a UI view provider (e.g.
@@ -1067,6 +1080,16 @@ function updateIframeContent(node, elements, forceView = null) {
  * @param {string} viewName - Name of view to switch to
  */
 function handleViewChange(node, elements, viewName) {
+  // Persist selected view into view_state so it survives refresh/reload
+  const vsWidget = node.widgets?.find(w => w.name === "view_state");
+  if (vsWidget) {
+    try {
+      const vs = JSON.parse(vsWidget.value || "{}");
+      vs._selectedView = viewName || null;
+      vsWidget.value = JSON.stringify(vs);
+    } catch {}
+  }
+
   if (elements.multiviewContent) {
     elements.lastContentHash = "";
     updateIframeContent(node, elements, viewName);
